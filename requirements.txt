@@ -1,0 +1,10 @@
+deepface
+opencv-python
+numpy==2.2.6
+pandas
+pillow==12.1.0
+mediapipe
+scikit-learn
+matplotlib
+seaborn
+tf-keras
