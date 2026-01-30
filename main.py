@@ -8,6 +8,11 @@ import matplotlib.pyplot as plt
 from collections import defaultdict, Counter
 from datetime import datetime
 import warnings
+import urllib.request
+
+import mediapipe as mp
+from mediapipe.tasks.python import vision
+from mediapipe import tasks
 warnings.filterwarnings("ignore")
 
 # Cores para emoções (BGR)
@@ -31,6 +36,20 @@ class VideoAnalyzer:
         self.pose = self._init_mediapipe()
         os.makedirs(output_dir, exist_ok=True)
 
+    def _download_mediapipe_model(self):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        model_dir = os.path.join(script_dir, 'models')
+        os.makedirs(model_dir, exist_ok=True)
+
+        model_path = os.path.join(model_dir, 'blaze_face_short_range.tflite')
+
+        if not os.path.exists(model_path):
+            model_url = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
+            urllib.request.urlretrieve(model_url, model_path)
+
+        return model_path
+
+
     def _init_mediapipe(self):
         try:
             import mediapipe as mp
@@ -51,17 +70,56 @@ class VideoAnalyzer:
 
     def analyze_faces(self, frame):
         try:
+            model_path = self._download_mediapipe_model()
+            
+            base_options = tasks.BaseOptions(model_asset_path=model_path)
+            options = vision.FaceDetectorOptions(base_options=base_options)
+            face_detector = vision.FaceDetector.create_from_options(options)
+
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = DeepFace.analyze(rgb, actions=['emotion', 'age', 'gender'],
-                                       enforce_detection=False, detector_backend='opencv')
-            results = results if isinstance(results, list) else [results]
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            detection_result = face_detector.detect(mp_image)
+            
+            result = []
+            for detection in detection_result.detections:
+                bbox = detection.bounding_box
+                x = int(bbox.origin_x)
+                y = int(bbox.origin_y)
+                w = int(bbox.width)
+                h = int(bbox.height)
+
+
+                face_region = frame[y:y+h, x:x+w]
+
+                if face_region.size > 0:
+                    try:
+                        results = DeepFace.analyze(
+                            face_region,
+                            actions=['emotion', 'age', 'gender'],
+                            enforce_detection=False,
+                            detector_backend='opencv'
+                        )
+
+                        results = results if isinstance(results, list) else [results]
+
+                        for r in results:
+                            r['m_region'] = {'x': x, 'y': y, 'w': w, 'h': h}
+                            result.append(r)
+
+                        
+                    except:
+                        return []
+                
+                
+                
             return [{
-                'region': r.get('region', {}),
-                'emotion': r.get('dominant_emotion', 'neutral'),
-                'confidence': max(r.get('emotion', {}).values(), default=0),
-                'age': r.get('age', 0),
-                'gender': r.get('dominant_gender', 'N/A')
-            } for r in results]
+                        'region': r.get('m_region', {}),
+                        'emotion': r.get('dominant_emotion', 'neutral'),
+                        'confidence': max(r.get('emotion', {}).values(), default=0),
+                        'age': r.get('age', 0),
+                        'gender': r.get('dominant_gender', 'N/A')
+                    } for r in result]
+
         except Exception:
             return []
 
@@ -115,8 +173,8 @@ class VideoAnalyzer:
         if save_video:
             w, h = int(self.cap.get(3)), int(self.cap.get(4))
             writer = cv2.VideoWriter(
-                f"{self.output_dir}/video_analisado.avi",
-                cv2.VideoWriter_fourcc(*'XVID'), self.fps, (w, h)
+                f"{self.output_dir}/video_analisado.mp4",
+                cv2.VideoWriter_fourcc(*'mp4v'), self.fps, (w, h)
             )
         
         print("Processando... (pressione 'q' para parar)")
@@ -265,7 +323,7 @@ class VideoAnalyzer:
 
 
 def main():
-    video_path = "video.mp4"
+    video_path = "./videos/input.mp4"
     
     if not os.path.exists(video_path):
         print(f"❌ Vídeo não encontrado: {video_path}")
@@ -275,7 +333,7 @@ def main():
     print("=" * 45)
     
     analyzer = VideoAnalyzer(video_path)
-    analyzer.process(skip_frames=2, save_video=True, show_preview=True)
+    analyzer.process(skip_frames=15, save_video=True, show_preview=True)
     analyzer.generate_report()
     
     print("\n✅ Concluído!")
