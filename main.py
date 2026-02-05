@@ -23,6 +23,33 @@ EMOTION_COLORS = {
 
 
 class VideoAnalyzer:
+    def preprocess_face(self, face_region):
+        # Redimensionamento da imagem
+        face = cv2.resize(face_region, (152, 152))
+
+        # equalização de histograma (em cada canal)
+        if len(face.shape) == 3 and face.shape[2] == 3:
+            for i in range(3):
+                face[:, :, i] = cv2.equalizeHist(face[:, :, i])
+        else:
+            face = cv2.equalizeHist(face)
+
+        # remoção de ruido Gaussian Blur
+        face = cv2.GaussianBlur(face, (3, 3), 0)
+
+        # Ajuste de brilho/contraste
+        alpha = 1.2
+        beta = 10    
+        face = cv2.convertScaleAbs(face, alpha=alpha, beta=beta)
+
+        # aumento de nitidez (filtro de realce)
+        kernel = np.array([[0, -1, 0], [-1, 5,-1], [0, -1, 0]])
+        face = cv2.filter2D(face, -1, kernel)
+
+        # normalização para o deepface
+        face = cv2.normalize(face, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+        return face
     def __init__(self, video_path, output_dir="analysis_results"):
         self.video_path = video_path
         self.output_dir = output_dir
@@ -71,15 +98,15 @@ class VideoAnalyzer:
     def analyze_faces(self, frame):
         try:
             model_path = self._download_mediapipe_model()
-            
             base_options = tasks.BaseOptions(model_asset_path=model_path)
             options = vision.FaceDetectorOptions(base_options=base_options)
             face_detector = vision.FaceDetector.create_from_options(options)
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pre_face = self.preprocess_face(rgb)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             detection_result = face_detector.detect(mp_image)
-            
+
             result = []
             for detection in detection_result.detections:
                 bbox = detection.bounding_box
@@ -88,38 +115,29 @@ class VideoAnalyzer:
                 w = int(bbox.width)
                 h = int(bbox.height)
 
-
                 face_region = frame[y:y+h, x:x+w]
 
                 if face_region.size > 0:
                     try:
+                        pre_face = self.preprocess_face(face_region)
                         results = DeepFace.analyze(
-                            face_region,
-                            actions=['emotion', 'age', 'gender'],
+                            pre_face,
+                            actions=['emotion'],
                             enforce_detection=False,
                             detector_backend='opencv'
                         )
-
                         results = results if isinstance(results, list) else [results]
-
                         for r in results:
                             r['m_region'] = {'x': x, 'y': y, 'w': w, 'h': h}
                             result.append(r)
-
-                        
                     except:
                         return []
-                
-                
-                
+
             return [{
                         'region': r.get('m_region', {}),
                         'emotion': r.get('dominant_emotion', 'neutral'),
-                        'confidence': max(r.get('emotion', {}).values(), default=0),
-                        'age': r.get('age', 0),
-                        'gender': r.get('dominant_gender', 'N/A')
+                        'confidence': max(r.get('emotion', {}).values(), default=0)
                     } for r in result]
-
         except Exception:
             return []
 
@@ -130,18 +148,26 @@ class VideoAnalyzer:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = self.pose.process(rgb)
             if not results.pose_landmarks:
+                print('[DEBUG] Nenhum landmark detectado neste frame.')
                 return {'detected': False, 'type': 'unknown', 'confidence': 0}
-            
+
             lm = results.pose_landmarks.landmark
+            # Debug: mostrar valores dos landmarks principais
+            print(f"[DEBUG] lm[11].y={lm[11].y:.2f}, lm[12].y={lm[12].y:.2f}, lm[15].y={lm[15].y:.2f}, lm[16].y={lm[16].y:.2f}, lm[23].y={lm[23].y:.2f}, lm[24].y={lm[24].y:.2f}")
             arms_up = lm[15].y < lm[11].y and lm[16].y < lm[12].y
             torso = abs((lm[23].y + lm[24].y)/2 - (lm[11].y + lm[12].y)/2)
-            
+            print(f"[DEBUG] arms_up={arms_up}, torso={torso:.2f}")
+
             if arms_up:
+                print('[DEBUG] Atividade detectada: gesticulando')
                 return {'detected': True, 'type': 'gesticulando', 'confidence': 0.7}
-            elif torso < 0.3:
+            elif torso < 0.4:  # threshold mais permissivo
+                print('[DEBUG] Atividade detectada: sentado')
                 return {'detected': True, 'type': 'sentado', 'confidence': 0.6}
+            print('[DEBUG] Atividade detectada: em_pe')
             return {'detected': True, 'type': 'em_pe', 'confidence': 0.6}
-        except Exception:
+        except Exception as e:
+            print(f'[DEBUG] Erro na análise de atividade: {e}')
             return {'detected': False, 'type': 'unknown', 'confidence': 0}
 
     def draw_overlay(self, frame, faces, activity):
@@ -154,8 +180,6 @@ class VideoAnalyzer:
             cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
             cv2.putText(frame, f"{f['emotion']}: {f['confidence']:.0f}%", (x, y-10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-            cv2.putText(frame, f"{f['gender']}, {int(f['age'])}", (x, y+h+15),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
         
         if activity.get('detected'):
             cv2.putText(frame, f"Atividade: {activity['type']}", (10, frame.shape[0]-20),
