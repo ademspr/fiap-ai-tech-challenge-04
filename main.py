@@ -1,91 +1,388 @@
+import os
 import cv2
 import numpy as np
 from deepface import DeepFace
-import pandas as pd
-import os
-import json
-import matplotlib.pyplot as plt
-from collections import defaultdict, Counter
-from datetime import datetime
+from tqdm import tqdm
 import warnings
 import urllib.request
-
+import tensorflow as tf
 import mediapipe as mp
 from mediapipe.tasks.python import vision
 from mediapipe import tasks
+from collections import Counter
+
 warnings.filterwarnings("ignore")
 
 # Cores para emoções (BGR)
 EMOTION_COLORS = {
-    'angry': (0, 0, 255), 'disgust': (0, 128, 0), 'fear': (128, 0, 128),
-    'happy': (0, 255, 255), 'sad': (255, 0, 0), 'surprise': (255, 165, 0), 'neutral': (128, 128, 128)
+    "angry": (0, 0, 255),
+    "disgust": (0, 128, 0),
+    "fear": (128, 0, 128),
+    "happy": (0, 255, 255),
+    "sad": (255, 0, 0),
+    "surprise": (255, 165, 0),
+    "neutral": (128, 128, 128),
 }
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.join(SCRIPT_DIR, "models")
+LABELS_PATH = os.path.join(SCRIPT_DIR, "labels.txt")
+
+# Classes COCO que representam pessoas/animais — ignoradas no detector
+# de atividade (pessoas já são tratadas via face detection).
+IGNORED_ACTIVITY_CLASSES = {1, 3, 17, 37, 43, 45, 46, 47, 59, 65, 74, 77, 78, 79, 80}
+
+# Limiar de velocidade de landmarks (px/frame) para anomalia
+# (gestos bruscos ou comportamentos atípicos).
+ANOMALY_VELOCITY_THRESHOLD = 35.0
 
 
 class VideoAnalyzer:
-    def preprocess_face(self, face_region):
-        # Redimensionamento da imagem
+    """Analisa um vídeo: reconhecimento facial, emoções, atividades e anomalias."""
+
+    def __init__(self, video_path: str, output_dir: str = "analysis_results"):
+        self.video_path = video_path
+        self.output_dir = output_dir
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Video state
+        self.cap = None
+        self.fps = 30
+        self.total_frames = 0
+        self.width = 0
+        self.height = 0
+        self.frame_count = 0
+
+        # Analysis data
+        self.frame_analysis: list[dict] = []
+        self.emotion_timeline: list[dict] = []
+        self.activity_timeline: list[dict] = []
+        self.anomaly_timeline: list[dict] = []
+
+        # Load models ONCE at init
+        self.face_detector = self._load_face_detector()
+        self.pose = self._load_mediapipe_pose()
+        self.activity_session, self.activity_tensors, self.activity_labels, self.activity_colors = (
+            self._load_activity_model()
+        )
+
+        # Previous pose landmarks for anomaly detection
+        self._prev_landmarks = None
+
+    # ------------------------------------------------------------------
+    # Model loading (executed once)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _ensure_model(filename: str, url: str) -> str:
+        os.makedirs(MODEL_DIR, exist_ok=True)
+        path = os.path.join(MODEL_DIR, filename)
+        if not os.path.exists(path):
+            print(f"⬇️  Baixando {filename}...")
+            urllib.request.urlretrieve(url, path)
+        return path
+
+    def _load_face_detector(self) -> vision.FaceDetector:
+        model_path = self._ensure_model(
+            "blaze_face_short_range.tflite",
+            "https://storage.googleapis.com/mediapipe-models/face_detector/"
+            "blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
+        )
+        options = vision.FaceDetectorOptions(
+            base_options=tasks.BaseOptions(model_asset_path=model_path),
+        )
+        return vision.FaceDetector.create_from_options(options)
+
+    @staticmethod
+    def _load_mediapipe_pose():
+        try:
+            return mp.solutions.pose.Pose(
+                static_image_mode=False,
+                model_complexity=1,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5,
+            )
+        except Exception:
+            return None
+
+    def _load_activity_model(self):
+        model_path = self._ensure_model(
+            "frozen_inference_graph.pb",
+            "https://github.com/visiongeeklabs/human-activity-detection/"
+            "releases/download/v0.1.0/frozen_inference_graph.pb",
+        )
+
+        with open(LABELS_PATH, "r") as f:
+            labels = [line.strip() for line in f.readlines()]
+
+        graph = tf.Graph()
+        with graph.as_default():
+            graph_def = tf.compat.v1.GraphDef()
+            with tf.io.gfile.GFile(model_path, "rb") as fid:
+                graph_def.ParseFromString(fid.read())
+            tf.import_graph_def(graph_def, name="")
+
+            sess = tf.compat.v1.Session(graph=graph)
+            all_tensor_names = {
+                output.name
+                for op in tf.compat.v1.get_default_graph().get_operations()
+                for output in op.outputs
+            }
+            tensor_dict = {}
+            for key in ("num_detections", "detection_boxes", "detection_scores", "detection_classes"):
+                tname = key + ":0"
+                if tname in all_tensor_names:
+                    tensor_dict[key] = graph.get_tensor_by_name(tname)
+
+            image_tensor = graph.get_tensor_by_name("image_tensor:0")
+
+        colors = np.random.RandomState(42).uniform(0, 255, size=(len(labels), 3))
+        return sess, {**tensor_dict, "image_tensor": image_tensor}, labels, colors
+
+    # ------------------------------------------------------------------
+    # MediaPipe unificado: face detector + pose (uma conversão RGB, dois modelos)
+    # ------------------------------------------------------------------
+
+    def _run_mediapipe(self, frame: np.ndarray):
+        """
+        Executa Face Detector e Pose no mesmo frame (uma única conversão BGR->RGB).
+        Retorna (detections, pose_result) para uso em analyze_faces e detect_anomaly.
+        """
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        try:
+            detections = self.face_detector.detect(mp_image).detections
+        except Exception:
+            detections = []
+        pose_result = self.pose.process(rgb) if self.pose else None
+        return detections, pose_result
+
+    # ------------------------------------------------------------------
+    # Face preprocessing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def preprocess_face(face_region: np.ndarray) -> np.ndarray:
+        """Normaliza iluminação, remove ruído e realça nitidez."""
         face = cv2.resize(face_region, (152, 152))
 
-        # equalização de histograma (em cada canal)
         if len(face.shape) == 3 and face.shape[2] == 3:
             for i in range(3):
                 face[:, :, i] = cv2.equalizeHist(face[:, :, i])
         else:
             face = cv2.equalizeHist(face)
 
-        # remoção de ruido Gaussian Blur
         face = cv2.GaussianBlur(face, (3, 3), 0)
+        face = cv2.convertScaleAbs(face, alpha=1.2, beta=10)
 
-        # Ajuste de brilho/contraste
-        alpha = 1.2
-        beta = 10    
-        face = cv2.convertScaleAbs(face, alpha=alpha, beta=beta)
-
-        # aumento de nitidez (filtro de realce)
-        kernel = np.array([[0, -1, 0], [-1, 5,-1], [0, -1, 0]])
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
         face = cv2.filter2D(face, -1, kernel)
 
-        # normalização para o deepface
-        face = cv2.normalize(face, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        return cv2.normalize(face, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-        return face
-    def __init__(self, video_path, output_dir="analysis_results"):
-        self.video_path = video_path
-        self.output_dir = output_dir
-        self.cap = None
-        self.frame_analysis = []
-        self.emotion_timeline = []
-        self.activity_timeline = []
-        self.frame_count = 0
-        self.fps = 30
-        self.total_frames = 0
-        self.pose = self._init_mediapipe()
-        os.makedirs(output_dir, exist_ok=True)
+    # ------------------------------------------------------------------
+    # 1 + 2. Reconhecimento facial + Análise de expressões emocionais
+    # ------------------------------------------------------------------
 
-    def _download_mediapipe_model(self):
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        model_dir = os.path.join(script_dir, 'models')
-        os.makedirs(model_dir, exist_ok=True)
+    def analyze_faces(
+        self, frame: np.ndarray, detections: list
+    ) -> list[dict]:
+        """Detecta rostos e analisa emoções de cada rosto. Se detections for passado, usa-os (evita rodar face detector de novo)."""
+        results = []
+        for det in detections:
+            bb = det.bounding_box
+            x, y, w, h = int(bb.origin_x), int(bb.origin_y), int(bb.width), int(bb.height)
 
-        model_path = os.path.join(model_dir, 'blaze_face_short_range.tflite')
+            # Clamp dentro dos limites do frame
+            x, y = max(0, x), max(0, y)
+            x2 = min(x + w, frame.shape[1])
+            y2 = min(y + h, frame.shape[0])
+            face_roi = frame[y:y2, x:x2]
 
-        if not os.path.exists(model_path):
-            model_url = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
-            urllib.request.urlretrieve(model_url, model_path)
+            if face_roi.size == 0:
+                continue
 
-        return model_path
+            try:
+                preprocessed = self.preprocess_face(face_roi)
+                analysis = DeepFace.analyze(
+                    preprocessed,
+                    actions=["emotion"],
+                    enforce_detection=False,
+                    detector_backend="skip",
+                )
+                analysis = analysis if isinstance(analysis, list) else [analysis]
+                for a in analysis:
+                    results.append(
+                        {
+                            "region": {"x": x, "y": y, "w": x2 - x, "h": y2 - y},
+                            "emotion": a.get("dominant_emotion", "neutral"),
+                            "emotions": a.get("emotion", {}),
+                            "confidence": max(a.get("emotion", {}).values(), default=0),
+                        }
+                    )
+            except Exception:
+                results.append(
+                    {
+                        "region": {"x": x, "y": y, "w": x2 - x, "h": y2 - y},
+                        "emotion": "unknown",
+                        "emotions": {},
+                        "confidence": 0,
+                    }
+                )
+        return results
 
+    # ------------------------------------------------------------------
+    # 3. Detecção de atividades
+    # ------------------------------------------------------------------
 
-    def _init_mediapipe(self):
+    def analyze_activity(self, frame: np.ndarray) -> list[dict]:
+        """Detecta atividades/objetos no frame."""
+        tensors = self.activity_tensors
+        frame_exp = np.expand_dims(frame, axis=0)
+
+        feed = {tensors["image_tensor"]: frame_exp}
+        fetch = {k: v for k, v in tensors.items() if k != "image_tensor"}
+
         try:
-            import mediapipe as mp
-            return mp.solutions.pose.Pose(
-                static_image_mode=False, model_complexity=1,
-                min_detection_confidence=0.5, min_tracking_confidence=0.5
-            )
+            out = self.activity_session.run(fetch, feed_dict=feed)
         except Exception:
+            return []
+
+        num = int(out["num_detections"][0])
+        classes = out["detection_classes"][0].astype(np.uint8)
+        boxes = out["detection_boxes"][0]
+        scores = out["detection_scores"][0]
+
+        fh, fw = frame.shape[:2]
+        threshold = 0.5
+        detected: list[dict] = []
+
+        for i in range(num):
+            cls = int(classes[i])
+            if cls in IGNORED_ACTIVITY_CLASSES:
+                continue
+            if scores[i] < threshold:
+                continue
+
+            bbox = boxes[i].copy()
+            bbox[0] *= fh
+            bbox[1] *= fw
+            bbox[2] *= fh
+            bbox[3] *= fw
+
+            idx = cls - 1
+            label = self.activity_labels[idx] if idx < len(self.activity_labels) else f"class_{cls}"
+            if label == "N/A":
+                continue
+
+            detected.append(
+                {
+                    "type": label,
+                    "confidence": float(scores[i]),
+                    "bbox": [int(bbox[1]), int(bbox[0]), int(bbox[3]), int(bbox[2])],
+                    "color_idx": idx,
+                }
+            )
+        return detected
+
+    # ------------------------------------------------------------------
+    # 4. Detecção de anomalias (movimentos bruscos / atípicos)
+    # ------------------------------------------------------------------
+
+    def detect_anomaly(
+        self, frame: np.ndarray, pose_result
+    ) -> dict | None:
+        """Detecta movimentos anômalos via variação brusca de pose landmarks. Se pose_result for passado, usa-o."""
+        result = pose_result
+        if not result or not result.pose_landmarks:
+            self._prev_landmarks = None
             return None
+
+        fh, fw = frame.shape[:2]
+        current = np.array(
+            [(lm.x * fw, lm.y * fh) for lm in result.pose_landmarks.landmark]
+        )
+
+        anomaly = None
+        if self._prev_landmarks is not None:
+            velocities = np.linalg.norm(current - self._prev_landmarks, axis=1)
+            max_vel = float(velocities.max())
+            mean_vel = float(velocities.mean())
+
+            if max_vel > ANOMALY_VELOCITY_THRESHOLD:
+                anomaly = {
+                    "max_velocity": round(max_vel, 2),
+                    "mean_velocity": round(mean_vel, 2),
+                    "description": "Movimento brusco / atípico detectado",
+                }
+
+        self._prev_landmarks = current
+        return anomaly
+
+    # ------------------------------------------------------------------
+    # Drawing
+    # ------------------------------------------------------------------
+
+    def draw_overlay(
+        self,
+        frame: np.ndarray,
+        faces: list[dict],
+        activities: list[dict],
+        anomaly: dict | None,
+    ) -> np.ndarray:
+        # Faces + emoções
+        for f in faces:
+            r = f["region"]
+            x, y, w, h = r["x"], r["y"], r["w"], r["h"]
+            color = EMOTION_COLORS.get(f["emotion"], (255, 255, 255))
+            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+            text = f"{f['emotion']}: {f['confidence']:.0f}%"
+            cv2.putText(frame, text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+        # Atividades
+        for act in activities:
+            bx = act["bbox"]
+            idx = act["color_idx"]
+            c = tuple(int(v) for v in self.activity_colors[idx % len(self.activity_colors)])
+            cv2.rectangle(frame, (bx[0], bx[1]), (bx[2], bx[3]), c, 2)
+            cv2.putText(
+                frame,
+                f"{act['type']} {act['confidence']:.0%}",
+                (bx[0], bx[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                c,
+                2,
+            )
+
+        # Anomalia
+        if anomaly:
+            cv2.putText(
+                frame,
+                f"ANOMALIA (vel={anomaly['max_velocity']:.0f})",
+                (10, frame.shape[0] - 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2,
+            )
+
+        # Info
+        ts = self.frame_count / self.fps
+        cv2.putText(
+            frame,
+            f"Frame: {self.frame_count} | {ts:.1f}s",
+            (10, 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+        )
+        return frame
+
+    # ------------------------------------------------------------------
+    # Pipeline principal
+    # ------------------------------------------------------------------
 
     def _init_video(self):
         self.cap = cv2.VideoCapture(self.video_path)
@@ -93,274 +390,154 @@ class VideoAnalyzer:
             raise ValueError(f"Não foi possível abrir: {self.video_path}")
         self.fps = int(self.cap.get(cv2.CAP_PROP_FPS)) or 30
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        print(f"📹 Vídeo: {self.total_frames} frames, {self.total_frames/self.fps:.1f}s")
+        self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"📹 Vídeo: {self.total_frames} frames, {self.total_frames / self.fps:.1f}s, {self.width}x{self.height}")
 
-    def analyze_faces(self, frame):
-        try:
-            model_path = self._download_mediapipe_model()
-            base_options = tasks.BaseOptions(model_asset_path=model_path)
-            options = vision.FaceDetectorOptions(base_options=base_options)
-            face_detector = vision.FaceDetector.create_from_options(options)
-
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            pre_face = self.preprocess_face(rgb)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            detection_result = face_detector.detect(mp_image)
-
-            result = []
-            for detection in detection_result.detections:
-                bbox = detection.bounding_box
-                x = int(bbox.origin_x)
-                y = int(bbox.origin_y)
-                w = int(bbox.width)
-                h = int(bbox.height)
-
-                face_region = frame[y:y+h, x:x+w]
-
-                if face_region.size > 0:
-                    try:
-                        pre_face = self.preprocess_face(face_region)
-                        results = DeepFace.analyze(
-                            pre_face,
-                            actions=['emotion'],
-                            enforce_detection=False,
-                            detector_backend='opencv'
-                        )
-                        results = results if isinstance(results, list) else [results]
-                        for r in results:
-                            r['m_region'] = {'x': x, 'y': y, 'w': w, 'h': h}
-                            result.append(r)
-                    except:
-                        return []
-
-            return [{
-                        'region': r.get('m_region', {}),
-                        'emotion': r.get('dominant_emotion', 'neutral'),
-                        'confidence': max(r.get('emotion', {}).values(), default=0)
-                    } for r in result]
-        except Exception:
-            return []
-
-    def analyze_activity(self, frame):
-        if not self.pose:
-            return {'detected': False, 'type': 'unknown', 'confidence': 0}
-        try:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self.pose.process(rgb)
-            if not results.pose_landmarks:
-                print('[DEBUG] Nenhum landmark detectado neste frame.')
-                return {'detected': False, 'type': 'unknown', 'confidence': 0}
-
-            lm = results.pose_landmarks.landmark
-            # Debug: mostrar valores dos landmarks principais
-            print(f"[DEBUG] lm[11].y={lm[11].y:.2f}, lm[12].y={lm[12].y:.2f}, lm[15].y={lm[15].y:.2f}, lm[16].y={lm[16].y:.2f}, lm[23].y={lm[23].y:.2f}, lm[24].y={lm[24].y:.2f}")
-            arms_up = lm[15].y < lm[11].y and lm[16].y < lm[12].y
-            torso = abs((lm[23].y + lm[24].y)/2 - (lm[11].y + lm[12].y)/2)
-            print(f"[DEBUG] arms_up={arms_up}, torso={torso:.2f}")
-
-            if arms_up:
-                print('[DEBUG] Atividade detectada: gesticulando')
-                return {'detected': True, 'type': 'gesticulando', 'confidence': 0.7}
-            elif torso < 0.4:  # threshold mais permissivo
-                print('[DEBUG] Atividade detectada: sentado')
-                return {'detected': True, 'type': 'sentado', 'confidence': 0.6}
-            print('[DEBUG] Atividade detectada: em_pe')
-            return {'detected': True, 'type': 'em_pe', 'confidence': 0.6}
-        except Exception as e:
-            print(f'[DEBUG] Erro na análise de atividade: {e}')
-            return {'detected': False, 'type': 'unknown', 'confidence': 0}
-
-    def draw_overlay(self, frame, faces, activity):
-        for f in faces:
-            r = f.get('region', {})
-            if not r:
-                continue
-            x, y, w, h = r.get('x', 0), r.get('y', 0), r.get('w', 0), r.get('h', 0)
-            color = EMOTION_COLORS.get(f['emotion'], (255, 255, 255))
-            cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
-            cv2.putText(frame, f"{f['emotion']}: {f['confidence']:.0f}%", (x, y-10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-        
-        if activity.get('detected'):
-            cv2.putText(frame, f"Atividade: {activity['type']}", (10, frame.shape[0]-20),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
-        ts = self.frame_count / self.fps
-        cv2.putText(frame, f"Frame: {self.frame_count} | {ts:.1f}s", (10, 25),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        return frame
-
-    def process(self, skip_frames=2, save_video=True, show_preview=True):
+    def process(self, skip_frames: int = 2, save_video: bool = True, show_preview: bool = True):
         self._init_video()
-        
+
         writer = None
         if save_video:
-            w, h = int(self.cap.get(3)), int(self.cap.get(4))
+            out_path = os.path.join(self.output_dir, "video_analisado.mp4")
             writer = cv2.VideoWriter(
-                f"{self.output_dir}/video_analisado.mp4",
-                cv2.VideoWriter_fourcc(*'mp4v'), self.fps, (w, h)
+                out_path,
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                self.fps,
+                (self.width, self.height),
             )
-        
-        print("Processando... (pressione 'q' para parar)")
-        
+
+        pbar = tqdm(total=self.total_frames, desc="Processando", unit="frame")
+
         try:
             while True:
                 ret, frame = self.cap.read()
                 if not ret:
                     break
-                
+
                 self.frame_count += 1
+                pbar.update(1)
+
+                # Skip frames para performance
                 if self.frame_count % (skip_frames + 1) != 0:
+                    if writer:
+                        writer.write(frame)
                     continue
-                
+
                 ts = self.frame_count / self.fps
-                faces = self.analyze_faces(frame)
-                activity = self.analyze_activity(frame)
-                
-                self.frame_analysis.append({
-                    'frame': self.frame_count, 'timestamp': ts,
-                    'faces': faces, 'activity': activity
-                })
-                
+
+                # MediaPipe uma vez: face detector + pose (anomalia)
+                detections, pose_result = self._run_mediapipe(frame)
+
+                # 1 + 2. Reconhecimento facial + emoções
+                faces = self.analyze_faces(frame, detections)
+
+                # 3. Detecção de atividades
+                activities = self.analyze_activity(frame)
+
+                # 4. Detecção de anomalias (reutiliza pose_result)
+                anomaly = self.detect_anomaly(frame, pose_result)
+
+                # Armazenar resultados
+                self.frame_analysis.append(
+                    {
+                        "frame": self.frame_count,
+                        "timestamp": ts,
+                        "faces": faces,
+                        "activities": [{"type": a["type"], "confidence": a["confidence"]} for a in activities],
+                        "anomaly": anomaly is not None,
+                    }
+                )
+
                 for f in faces:
-                    self.emotion_timeline.append({
-                        'timestamp': ts, 'emotion': f['emotion'], 'confidence': f['confidence']
-                    })
-                
-                if activity.get('detected'):
-                    self.activity_timeline.append({
-                        'timestamp': ts, 'activity': activity['type'], 'confidence': activity['confidence']
-                    })
-                
-                annotated = self.draw_overlay(frame, faces, activity)
+                    self.emotion_timeline.append(
+                        {"timestamp": ts, "emotion": f["emotion"], "confidence": f["confidence"]}
+                    )
+
+                for a in activities:
+                    self.activity_timeline.append(
+                        {"timestamp": ts, "activity": a["type"], "confidence": a["confidence"]}
+                    )
+
+                if anomaly:
+                    self.anomaly_timeline.append({"timestamp": ts, **anomaly})
+
+                # Desenhar anotações
+                annotated = self.draw_overlay(frame, faces, activities, anomaly)
                 if writer:
                     writer.write(annotated)
-                
-                progress = (self.frame_count / self.total_frames) * 100
-                print(f"\r{progress:.1f}% ({self.frame_count}/{self.total_frames})", end="")
-                
+
                 if show_preview:
-                    cv2.imshow('Analise', annotated)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                    cv2.imshow("Analise", annotated)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
                         break
-        
+
         except KeyboardInterrupt:
-            print("\nInterrompido")
+            print("\nInterrompido pelo usuário.")
         finally:
+            pbar.close()
             self.cap.release()
             if writer:
                 writer.release()
             cv2.destroyAllWindows()
-            print(f"\n✓ {len(self.frame_analysis)} frames analisados")
+            print(f"✓ {len(self.frame_analysis)} frames analisados")
 
     def generate_report(self):
+        """Exibe resumo na CLI e salva JSON em output_dir."""
         if not self.frame_analysis:
-            print("Nenhuma análise disponível")
+            print("Nenhuma análise disponível.")
             return
-        
+
         duration = self.total_frames / self.fps
-        total_faces = sum(len(f['faces']) for f in self.frame_analysis)
-        
-        print(f"\n{'='*50}")
-        print("RELATÓRIO DE ANÁLISE")
-        print(f"{'='*50}")
-        print(f"\n📊 Estatísticas:")
-        print(f"   Duração: {duration:.1f}s | Frames: {len(self.frame_analysis)} | Faces: {total_faces}")
-        
+        total_faces = sum(len(f["faces"]) for f in self.frame_analysis)
+        total_anomalies = len(self.anomaly_timeline)
+
+        print("\n" + "=" * 40)
+        print("  RESUMO DA ANÁLISE")
+        print("=" * 40)
+        print(f"  Duração: {duration:.1f}s  |  Frames: {len(self.frame_analysis)}  |  Rostos: {total_faces}  |  Anomalias: {total_anomalies}")
+
         if self.emotion_timeline:
-            emotions = Counter(e['emotion'] for e in self.emotion_timeline)
-            print(f"\n😊 Emoções:")
-            for emotion, count in emotions.most_common():
-                pct = count / len(self.emotion_timeline) * 100
-                avg_conf = np.mean([e['confidence'] for e in self.emotion_timeline if e['emotion'] == emotion])
-                print(f"   {emotion}: {count} ({pct:.1f}%) - {avg_conf:.0f}% confiança")
-        
+            emotions = Counter(e["emotion"] for e in self.emotion_timeline)
+            top = emotions.most_common(3)
+            print(f"  Emoções (top 3): {', '.join(f'{e}({c})' for e, c in top)}")
+
         if self.activity_timeline:
-            activities = Counter(a['activity'] for a in self.activity_timeline)
-            print(f"\n🏃 Atividades:")
-            for act, count in activities.most_common():
-                pct = count / len(self.activity_timeline) * 100
-                print(f"   {act.replace('_', ' ')}: {count} ({pct:.1f}%)")
-        
-        print(f"\n⏱️ Cronologia (por 10s):")
-        for i in range(0, int(duration), 10):
-            seg_emotions = [e['emotion'] for e in self.emotion_timeline if i <= e['timestamp'] < i+10]
-            dom_emotion = Counter(seg_emotions).most_common(1)[0][0] if seg_emotions else "N/A"
-            print(f"   {i:02d}-{min(i+10, int(duration)):02d}s: {dom_emotion}")
-        
-        self._save_data()
-        print(f"\n💾 Resultados salvos em: {self.output_dir}/")
-        print(f"{'='*50}")
+            acts = Counter(a["activity"] for a in self.activity_timeline)
+            top = acts.most_common(3)
+            act_str = ", ".join(f"{a.replace('_', ' ')}({c})" for a, c in top)
+            print(f"  Atividades (top 3): {act_str}")
 
-    def _save_data(self):
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        data = {
-            'video': {'path': self.video_path, 'fps': self.fps, 'frames': self.total_frames},
-            'analysis': self.frame_analysis,
-            'emotions': self.emotion_timeline,
-            'activities': self.activity_timeline
-        }
-        with open(f"{self.output_dir}/analise_{ts}.json", 'w') as f:
-            json.dump(data, f, indent=2, default=lambda x: float(x) if isinstance(x, np.floating) else int(x) if isinstance(x, np.integer) else x)
-        
-        if self.emotion_timeline:
-            pd.DataFrame(self.emotion_timeline).to_csv(f"{self.output_dir}/emocoes_{ts}.csv", index=False)
-        if self.activity_timeline:
-            pd.DataFrame(self.activity_timeline).to_csv(f"{self.output_dir}/atividades_{ts}.csv", index=False)
-        
-        self._create_charts(ts)
+        if total_anomalies:
+            print(f"  ⚠ {total_anomalies} anomalia(s) detectada(s).")
+        else:
+            print("  ✅ Nenhuma anomalia.")
+        print("=" * 40)
 
-    def _create_charts(self, ts):
-        try:
-            fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-            fig.suptitle('Resumo da Análise', fontsize=14)
-            
-            if self.emotion_timeline:
-                emotions = Counter(e['emotion'] for e in self.emotion_timeline)
-                axes[0, 0].pie(emotions.values(), labels=emotions.keys(), autopct='%1.1f%%')
-                axes[0, 0].set_title('Emoções')
-            
-            if self.emotion_timeline:
-                for i, em in enumerate(set(e['emotion'] for e in self.emotion_timeline)):
-                    times = [e['timestamp'] for e in self.emotion_timeline if e['emotion'] == em]
-                    axes[0, 1].scatter(times, [i]*len(times), label=em, alpha=0.6)
-                axes[0, 1].set_title('Timeline de Emoções')
-                axes[0, 1].legend(fontsize=8)
-            
-            if self.activity_timeline:
-                acts = Counter(a['activity'] for a in self.activity_timeline)
-                axes[1, 0].bar(acts.keys(), acts.values())
-                axes[1, 0].set_title('Atividades')
-            
-            times = [f['timestamp'] for f in self.frame_analysis]
-            faces = [len(f['faces']) for f in self.frame_analysis]
-            axes[1, 1].plot(times, faces, alpha=0.7)
-            axes[1, 1].fill_between(times, faces, alpha=0.3)
-            axes[1, 1].set_title('Faces Detectadas')
-            
-            plt.tight_layout()
-            plt.savefig(f"{self.output_dir}/graficos_{ts}.png", dpi=150)
-            plt.close()
-        except Exception as e:
-            print(f"Erro nos gráficos: {e}")
-
+# ======================================================================
+# Entry point
+# ======================================================================
 
 def main():
-    video_path = "./videos/input.mp4"
-    
+    video_path = os.path.join(SCRIPT_DIR, "videos", "input.mp4")
+
     if not os.path.exists(video_path):
         print(f"❌ Vídeo não encontrado: {video_path}")
+        print("   Coloque o vídeo em ./videos/input.mp4")
         return
-    
-    print("🎬 Sistema de Análise de Vídeo com DeepFace")
+
+    print("🎬 Sistema de Análise de Vídeo")
+    print("   • Reconhecimento Facial")
+    print("   • Análise de Expressões Emocionais")
+    print("   • Detecção de Atividades")
+    print("   • Detecção de Anomalias")
     print("=" * 45)
-    
+
     analyzer = VideoAnalyzer(video_path)
-    analyzer.process(skip_frames=15, save_video=True, show_preview=True)
+    analyzer.process(skip_frames=3, save_video=True, show_preview=False)
     analyzer.generate_report()
-    
-    print("\n✅ Concluído!")
+
+    print("\n✅ Análise concluída!")
 
 
 if __name__ == "__main__":
