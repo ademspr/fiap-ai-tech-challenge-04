@@ -1,15 +1,16 @@
 import os
-import cv2
-import numpy as np
-from deepface import DeepFace
-from tqdm import tqdm
-import warnings
 import urllib.request
-import tensorflow as tf
-import mediapipe as mp
-from mediapipe.tasks.python import vision
-from mediapipe import tasks
+import warnings
 from collections import Counter
+
+import cv2
+import mediapipe as mp
+import numpy as np
+import tensorflow as tf
+from deepface import DeepFace
+from mediapipe import tasks
+from mediapipe.tasks.python import vision
+from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
@@ -62,9 +63,12 @@ class VideoAnalyzer:
         # Load models ONCE at init
         self.face_detector = self._load_face_detector()
         self.pose = self._load_mediapipe_pose()
-        self.activity_session, self.activity_tensors, self.activity_labels, self.activity_colors = (
-            self._load_activity_model()
-        )
+        (
+            self.activity_session,
+            self.activity_tensors,
+            self.activity_labels,
+            self.activity_colors,
+        ) = self._load_activity_model()
 
         # Previous pose landmarks for anomaly detection
         self._prev_landmarks = None
@@ -129,7 +133,12 @@ class VideoAnalyzer:
                 for output in op.outputs
             }
             tensor_dict = {}
-            for key in ("num_detections", "detection_boxes", "detection_scores", "detection_classes"):
+            for key in (
+                "num_detections",
+                "detection_boxes",
+                "detection_scores",
+                "detection_classes",
+            ):
                 tname = key + ":0"
                 if tname in all_tensor_names:
                     tensor_dict[key] = graph.get_tensor_by_name(tname)
@@ -184,14 +193,18 @@ class VideoAnalyzer:
     # 1 + 2. Reconhecimento facial + Análise de expressões emocionais
     # ------------------------------------------------------------------
 
-    def analyze_faces(
-        self, frame: np.ndarray, detections: list
-    ) -> list[dict]:
-        """Detecta rostos e analisa emoções de cada rosto. Se detections for passado, usa-os (evita rodar face detector de novo)."""
+    def analyze_faces(self, frame: np.ndarray, detections: list) -> list[dict]:
+        """Detecta rostos e analisa emoções de cada rosto. Se detections for passado,
+        usa-os (evita rodar face detector de novo)."""
         results = []
         for det in detections:
             bb = det.bounding_box
-            x, y, w, h = int(bb.origin_x), int(bb.origin_y), int(bb.width), int(bb.height)
+            x, y, w, h = (
+                int(bb.origin_x),
+                int(bb.origin_y),
+                int(bb.width),
+                int(bb.height),
+            )
 
             # Clamp dentro dos limites do frame
             x, y = max(0, x), max(0, y)
@@ -271,7 +284,11 @@ class VideoAnalyzer:
             bbox[3] *= fw
 
             idx = cls - 1
-            label = self.activity_labels[idx] if idx < len(self.activity_labels) else f"class_{cls}"
+            label = (
+                self.activity_labels[idx]
+                if idx < len(self.activity_labels)
+                else f"class_{cls}"
+            )
             if label == "N/A":
                 continue
 
@@ -289,10 +306,9 @@ class VideoAnalyzer:
     # 4. Detecção de anomalias (movimentos bruscos / atípicos)
     # ------------------------------------------------------------------
 
-    def detect_anomaly(
-        self, frame: np.ndarray, pose_result
-    ) -> dict | None:
-        """Detecta movimentos anômalos via variação brusca de pose landmarks. Se pose_result for passado, usa-o."""
+    def detect_anomaly(self, frame: np.ndarray, pose_result) -> dict | None:
+        """Detecta movimentos anômalos via variação brusca de pose landmarks.
+        Se pose_result for passado, usa-o."""
         result = pose_result
         if not result or not result.pose_landmarks:
             self._prev_landmarks = None
@@ -336,18 +352,22 @@ class VideoAnalyzer:
             x, y, w, h = r["x"], r["y"], r["w"], r["h"]
             color = EMOTION_COLORS.get(f["emotion"], (255, 255, 255))
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-            text = f"{f['emotion']}: {f['confidence']:.0f}%"
-            cv2.putText(frame, text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            text = f"{f['emotion']}: {f['confidence']:.0f}%"  # noqa: E231
+            cv2.putText(
+                frame, text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2
+            )
 
         # Atividades
         for act in activities:
             bx = act["bbox"]
             idx = act["color_idx"]
-            c = tuple(int(v) for v in self.activity_colors[idx % len(self.activity_colors)])
+            c = tuple(
+                int(v) for v in self.activity_colors[idx % len(self.activity_colors)]
+            )
             cv2.rectangle(frame, (bx[0], bx[1]), (bx[2], bx[3]), c, 2)
             cv2.putText(
                 frame,
-                f"{act['type']} {act['confidence']:.0%}",
+                f"{act['type']} {act['confidence']:.0%}",  # noqa: E231
                 (bx[0], bx[1] - 10),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
@@ -359,7 +379,7 @@ class VideoAnalyzer:
         if anomaly:
             cv2.putText(
                 frame,
-                f"ANOMALIA (vel={anomaly['max_velocity']:.0f})",
+                f"ANOMALIA (vel={anomaly['max_velocity']:.0f})",  # noqa: E231
                 (10, frame.shape[0] - 50),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
@@ -371,7 +391,7 @@ class VideoAnalyzer:
         ts = self.frame_count / self.fps
         cv2.putText(
             frame,
-            f"Frame: {self.frame_count} | {ts:.1f}s",
+            f"Frame: {self.frame_count} | {ts:.1f}s",  # noqa: E231
             (10, 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -392,9 +412,14 @@ class VideoAnalyzer:
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        print(f"📹 Vídeo: {self.total_frames} frames, {self.total_frames / self.fps:.1f}s, {self.width}x{self.height}")
+        print(
+            f"📹 Vídeo: {self.total_frames} frames, {self.total_frames / self.fps:.1f}s,"  # noqa
+            f" {self.width}x{self.height}"
+        )
 
-    def process(self, skip_frames: int = 2, save_video: bool = True, show_preview: bool = True):
+    def process(  # noqa
+        self, skip_frames: int = 2, save_video: bool = True, show_preview: bool = True
+    ):
         self._init_video()
 
         writer = None
@@ -410,6 +435,8 @@ class VideoAnalyzer:
             )
 
         pbar = tqdm(total=self.total_frames, desc="Processando", unit="frame")
+
+        assert self.cap is not None
 
         try:
             while True:
@@ -444,19 +471,30 @@ class VideoAnalyzer:
                         "frame": self.frame_count,
                         "timestamp": ts,
                         "faces": faces,
-                        "activities": [{"type": a["type"], "confidence": a["confidence"]} for a in activities],
+                        "activities": [
+                            {"type": a["type"], "confidence": a["confidence"]}
+                            for a in activities
+                        ],
                         "anomaly": anomaly is not None,
                     }
                 )
 
                 for f in faces:
                     self.emotion_timeline.append(
-                        {"timestamp": ts, "emotion": f["emotion"], "confidence": f["confidence"]}
+                        {
+                            "timestamp": ts,
+                            "emotion": f["emotion"],
+                            "confidence": f["confidence"],
+                        }
                     )
 
                 for a in activities:
                     self.activity_timeline.append(
-                        {"timestamp": ts, "activity": a["type"], "confidence": a["confidence"]}
+                        {
+                            "timestamp": ts,
+                            "activity": a["type"],
+                            "confidence": a["confidence"],
+                        }
                     )
 
                 if anomaly:
@@ -495,7 +533,10 @@ class VideoAnalyzer:
         print("\n" + "=" * 40)
         print("  RESUMO DA ANÁLISE")
         print("=" * 40)
-        print(f"  Duração: {duration:.1f}s  |  Frames: {len(self.frame_analysis)}  |  Rostos: {total_faces}  |  Anomalias: {total_anomalies}")
+        print(
+            f"  Duração: {duration:.1f}s | Frames: {len(self.frame_analysis)} |"  # noqa
+            f" Rostos: {total_faces} | Anomalias: {total_anomalies}"
+        )
 
         if self.emotion_timeline:
             emotions = Counter(e["emotion"] for e in self.emotion_timeline)
@@ -514,9 +555,11 @@ class VideoAnalyzer:
             print("  ✅ Nenhuma anomalia.")
         print("=" * 40)
 
+
 # ======================================================================
 # Entry point
 # ======================================================================
+
 
 def main():
     video_path = os.path.join(SCRIPT_DIR, "videos", "input.mp4")
