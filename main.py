@@ -28,7 +28,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(SCRIPT_DIR, "models")
 LABELS_PATH = os.path.join(SCRIPT_DIR, "labels.txt")
 
-# Classes COCO que representam pessoas/animais — ignoradas no detector
+# Classes que representam pessoas/animais — ignoradas no detector
 # de atividade (pessoas já são tratadas via face detection).
 IGNORED_ACTIVITY_CLASSES = {1, 3, 17, 37, 43, 45, 46, 47, 59, 65, 74, 77, 78, 79, 80}
 
