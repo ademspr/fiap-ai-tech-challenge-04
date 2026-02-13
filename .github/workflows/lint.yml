@@ -1,0 +1,41 @@
+name: Lint and Format Check
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        version: latest
+
+    - name: Install dependencies
+      run: poetry install
+
+    - name: Run Black (code formatting check)
+      run: poetry run black --check --diff .
+
+    - name: Run isort (import sorting check)
+      run: poetry run isort --check-only --diff .
+
+    - name: Run flake8 (linting)
+      run: poetry run flake8 .
+
+    - name: Run mypy (type checking)
+      run: poetry run mypy .
+      continue-on-error: true
