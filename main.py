@@ -400,10 +400,12 @@ class VideoAnalyzer:
         writer = None
         if save_video:
             out_path = os.path.join(self.output_dir, "video_analisado.mp4")
+            output_fps = max(1, self.fps // (skip_frames + 1))
+
             writer = cv2.VideoWriter(
                 out_path,
                 cv2.VideoWriter_fourcc(*"mp4v"),
-                self.fps,
+                output_fps,
                 (self.width, self.height),
             )
 
@@ -420,8 +422,6 @@ class VideoAnalyzer:
 
                 # Skip frames para performance
                 if self.frame_count % (skip_frames + 1) != 0:
-                    if writer:
-                        writer.write(frame)
                     continue
 
                 ts = self.frame_count / self.fps
@@ -534,7 +534,7 @@ def main():
     print("=" * 45)
 
     analyzer = VideoAnalyzer(video_path)
-    analyzer.process(skip_frames=3, save_video=True, show_preview=False)
+    analyzer.process(skip_frames=1, save_video=True, show_preview=False)
     analyzer.generate_report()
 
     print("\n✅ Análise concluída!")
