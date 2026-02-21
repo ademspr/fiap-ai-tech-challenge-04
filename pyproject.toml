@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "fiap-video-analysis"
 version = "0.1.0"
-description = "Script to analyze video and detect faces and activies"
+description = "@TODO"
 authors = [
     "Ademir Pereira <ademirspr@live.com>",
     "Gabriel Santos <gabriel@ogabrielsantos.com.br>",
@@ -11,16 +11,6 @@ package-mode = false
 
 [tool.poetry.dependencies]
 python = "~3.12"
-pandas = "3.0.0"
-pillow = "12.1.0"
-scikit-learn = "1.8.0"
-opencv-python = "4.13.0.90"
-numpy = "2.4.1"
-deepface = "0.0.98"
-tqdm = "4.67.1"
-tf-keras = "2.20.1"
-mediapipe = "0.10.32"
-tensorflow = "2.20.0"
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.7.0"
