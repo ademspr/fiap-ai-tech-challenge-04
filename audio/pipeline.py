@@ -58,31 +58,25 @@ def analyze_transcript(transcript: str) -> dict:
 def run_audio_pipeline(
     video_path: str,
     output_dir: str | None = None,
-    skip_extract: bool = False,
-    audio_path: str | None = None,
 ) -> dict:
     """
-    Executa o pipeline de áudio: extrai áudio (ou usa audio_path),
-    transcreve e analisa. Retorna dict com transcript e analysis;
-    relatório JSON e diretório de saída ficam a cargo do chamador.
+    Executa o pipeline de áudio: extrai áudio, transcreve e analisa.
+    Retorna dict com transcript e analysis; relatório JSON e diretório
+    de saída ficam a cargo do chamador.
     """
     vpath = Path(video_path)
     if not vpath.exists():
         raise FileNotFoundError(f"Arquivo não encontrado: {vpath}")
+
     out_dir = Path(output_dir or config.OUTPUT_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if skip_extract and audio_path:
-        wav_path: str = audio_path
-    else:
-        wav_path = extract_audio(str(vpath), str(out_dir / f"{vpath.stem}_audio.wav"))
-
+    wav_path = extract_audio(str(vpath), str(out_dir / f"{vpath.stem}_audio.wav"))
     transcript = transcribe_audio(wav_path)
 
-    analysis = analyze_transcript(transcript)
     return {
         "video_path": str(vpath),
         "audio_path": wav_path,
         "transcript": transcript,
-        "analysis": analysis,
+        "analysis": analyze_transcript(transcript),
     }

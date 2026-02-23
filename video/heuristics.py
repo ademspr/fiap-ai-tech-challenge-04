@@ -1,5 +1,7 @@
 """Heurísticas de linguagem corporal a partir dos keypoints YOLOv8-pose (COCO 17)."""
 
+import config
+
 # Índices COCO: 0 nose, 1 left_eye, 2 right_eye, 3 left_ear, 4 right_ear,
 # 5 left_shoulder, 6 right_shoulder, 7 left_elbow, 8 right_elbow,
 # 9 left_wrist, 10 right_wrist, 11 left_hip, 12 right_hip,
@@ -21,7 +23,7 @@ def _get_pt(keypoints, idx: int):
         return None
     row = keypoints[idx]
     if len(row) >= 3 and row[2] >= MIN_CONF:
-        return (float(row[0]), float(row[1]))
+        return float(row[0]), float(row[1])
     return None
 
 
@@ -49,8 +51,9 @@ def hands_near_face(keypoints) -> bool:
     rw = _get_pt(keypoints, R_WRIST)
     if nose is None:
         return False
+    max_dist = getattr(config, "HEURISTIC_HANDS_NEAR_FACE_MAX_DIST_PX", 120)
     for w in (lw, rw):
-        if w is not None and _dist(w, nose) < 80:  # threshold em pixels
+        if w is not None and _dist(w, nose) < max_dist:
             return True
     return False
 
@@ -63,14 +66,17 @@ def arms_defensive(keypoints) -> bool:
     re = _get_pt(keypoints, R_ELBOW)
     lw = _get_pt(keypoints, L_WRIST)
     rw = _get_pt(keypoints, R_WRIST)
-    if not all([ls, rs, le, re, lw, rw]):
+    pts = [ls, rs, le, re, lw, rw]
+    if sum(1 for p in pts if p is not None) < 5:
         return False
-    # Cruzados: pulsos perto da linha central (entre os ombros)
+    if ls is None or rs is None:
+        return False
     mid_x = (ls[0] + rs[0]) / 2
-    lw_near_center = abs(lw[0] - mid_x) < 60
-    rw_near_center = abs(rw[0] - mid_x) < 60
-    # Cotovelos mais para fora que pulsos
-    elbows_out = le[0] < lw[0] and re[0] > rw[0]  # left elbow left of left wrist, etc
+    lw_near_center = lw is not None and abs(lw[0] - mid_x) < 60
+    rw_near_center = rw is not None and abs(rw[0] - mid_x) < 60
+    left_elbow_out = le is not None and lw is not None and le[0] < lw[0]
+    right_elbow_out = re is not None and rw is not None and re[0] > rw[0]
+    elbows_out = left_elbow_out or right_elbow_out
     return bool((lw_near_center or rw_near_center) and elbows_out)
 
 
@@ -82,14 +88,46 @@ def closed_posture(keypoints) -> bool:
     re = _get_pt(keypoints, R_ELBOW)
     lh = _get_pt(keypoints, L_HIP)
     rh = _get_pt(keypoints, R_HIP)
-    if not all([ls, rs, le, re, lh, rh]):
+    pts = [ls, rs, le, re, lh, rh]
+    if sum(1 for p in pts if p is not None) < 5:
         return False
-    # Cotovelos mais próximos (braços “fechados”) que a largura dos ombros
+    if not (ls and rs and le and re):
+        return False
     shoulder_span = abs(ls[0] - rs[0])
     if shoulder_span < 1:
         return False
     elbow_span = abs(le[0] - re[0])
     return bool(elbow_span < shoulder_span * 0.85)
+
+
+def arms_raised(keypoints) -> bool:
+    """Braço(s) levantado(s): pelo menos um pulso acima da linha do ombro."""
+    ls = _get_pt(keypoints, L_SHOULDER)
+    rs = _get_pt(keypoints, R_SHOULDER)
+    lw = _get_pt(keypoints, L_WRIST)
+    rw = _get_pt(keypoints, R_WRIST)
+    if lw is not None and ls is not None and lw[1] < ls[1]:
+        return True
+    if rw is not None and rs is not None and rw[1] < rs[1]:
+        return True
+    return False
+
+
+def shoulders_contracted(keypoints) -> bool:
+    """Ombros contraídos: distância entre ombros pequena em relação ao tronco."""
+    ls = _get_pt(keypoints, L_SHOULDER)
+    rs = _get_pt(keypoints, R_SHOULDER)
+    lh = _get_pt(keypoints, L_HIP)
+    rh = _get_pt(keypoints, R_HIP)
+    if not all([ls, rs, lh, rh]):
+        return False
+    shoulder_span = abs(ls[0] - rs[0])
+    mid_shoulder_y = (ls[1] + rs[1]) / 2
+    mid_hip_y = (lh[1] + rh[1]) / 2
+    torso_height = abs(mid_shoulder_y - mid_hip_y)
+    if torso_height < 10:
+        return False
+    return bool(shoulder_span < torso_height * 0.45)
 
 
 def compute_frame_indicators(keypoints):
@@ -108,6 +146,10 @@ def compute_frame_indicators(keypoints):
         reasons.append("arms_defensive")
     if closed_posture(keypoints):
         reasons.append("closed_posture")
+    if arms_raised(keypoints):
+        reasons.append("arms_raised")
+    if shoulders_contracted(keypoints):
+        reasons.append("shoulders_contracted")
     return {
         "discomfort": len(reasons) > 0,
         "reasons": reasons,

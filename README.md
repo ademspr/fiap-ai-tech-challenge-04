@@ -17,17 +17,23 @@ Na primeira execução, o YOLOv8 (modelo `yolov8n-pose.pt`) e o faster-whisper (
 
 ## Uso
 
-Coloque um vídeo de consulta (ex.: `data/demo_consultation.mp4`) e execute:
+Coloque um vídeo de consulta (ex.: `data/demo_consultation.mp4`). Dois subcomandos:
+
+**Análise (relatórios JSON):**
 
 ```bash
-poetry run python main.py data/demo_consultation.mp4
+poetry run python main.py run data/demo_consultation.mp4
 ```
 
-Opções:
+Opções: `--output-dir DIR`, `--skip-audio`, `--skip-video`.
 
-- `--output-dir DIR` — Pasta para os relatórios (padrão: `output/`).
-- `--skip-audio` — Executa apenas o pipeline de vídeo.
-- `--skip-video` — Executa apenas o pipeline de áudio.
+**Vídeo anotado (caixas e rótulos no vídeo, com áudio e tempo correto):**
+
+```bash
+poetry run python main.py annotate-video data/demo_consultation.mp4
+```
+
+O vídeo anotado é gerado em `output/video_annotated_<nome>.mp4`. O áudio do vídeo original e os metadados de duração (tempo em segundos no player) são incluídos **em Python** via MoviePy; o texto com acentos (ex.: "Mãos no rosto") é desenhado com Pillow. O usuário não precisa executar ffmpeg manualmente.
 
 Os relatórios (JSON) são gerados em `output/`:
 
@@ -45,7 +51,7 @@ Sugestão: use um vídeo curto (30 s a 2 min) de cena de consulta (médico + pac
 Coloque o arquivo em `data/` (ex.: `data/demo_consultation.mp4`) e rode:
 
 ```bash
-poetry run python main.py data/demo_consultation.mp4
+poetry run python main.py run data/demo_consultation.mp4
 ```
 
 ## Fluxo multimodal
@@ -58,14 +64,14 @@ poetry run python main.py data/demo_consultation.mp4
 Edite `config.py` para alterar:
 
 - `YOLO_POSE_MODEL` — `yolov8n-pose.pt` (nano) ou `yolov8s-pose.pt` (small).
-- `VIDEO_SAMPLE_EVERY_N_FRAMES` — Processar 1 a cada N frames (ex.: 5) para acelerar.
+- `VIDEO_SAMPLE_EVERY_N_FRAMES` — Processar 1 a cada N frames (padrão 3; menor = mais padrões detectados, mais uso de CPU).
 - `WHISPER_MODEL_SIZE` — `tiny` ou `base` para CPU.
 
 ## Estrutura do projeto
 
 - `main.py` — Orquestrador (CLI).
 - `config.py` — Configurações (modelos, pastas).
-- `video/` — Pipeline de vídeo (YOLOv8-pose, heurísticas, relatório).
+- `video/` — Pipeline de vídeo (YOLOv8-pose, heurísticas, relatório, vídeo anotado com Pillow e MoviePy).
 - `audio/` — Pipeline de áudio (MoviePy, faster-whisper, análise de texto, relatório).
 - `data/` — Pasta para vídeo(s) de demonstração.
 - `output/` — Relatórios gerados (criada automaticamente).
