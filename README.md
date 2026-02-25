@@ -46,7 +46,7 @@ Reports (JSON) are written to `output/`:
 Use **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** (install with `pip install yt-dlp` or `brew install yt-dlp`) to download a demo video:
 
 ```bash
-yt-dlp -f mp4 -o data/teste.mp4 "https://www.youtube.com/watch?v=snG5323GGQ4"
+yt-dlp -f mp4 -o data/teste.mp4 "https://www.youtube.com/watch?v=UuGihqamwUs"
 ```
 
 If you already downloaded elsewhere, move to `data/` and rename to `teste.mp4`:
