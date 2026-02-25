@@ -1,69 +1,110 @@
-"""Análise leve do texto transcrito: regras/heurísticas (ansiedade, hesitação)."""
+"""Light analysis of transcribed text: rules/heuristics (anxiety, hesitation,
+discomfort, etc.)"""
 
-# Listas de termos indicativos (contexto saúde da mulher / consultas)
 TERMS_ANXIETY = [
-    "ansiosa",
-    "ansiedade",
-    "nervosa",
-    "preocupada",
-    "medo",
-    "assustada",
-    "estresse",
-    "estressada",
-    "tensão",
-    "inquieta",
+    "anxious",
+    "anxiety",
+    "nervous",
+    "worried",
+    "fear",
+    "scared",
+    "stress",
+    "stressed",
+    "tension",
+    "restless",
 ]
 
 TERMS_HESITATION = [
-    "hum",
-    "ah",
+    "um",
+    "uh",
     "eh",
-    "então",
-    "tipo",
-    "assim",
-    "né",
-    "bom",
-    "olha",
-    "sei lá",
+    "so",
+    "like",
+    "well",
+    "anyway",
+    "basically",
+    "actually",
 ]
 
 TERMS_DISCOMFORT = [
-    "desconforto",
-    "dor",
-    "incômodo",
-    "difícil",
-    "complicado",
-    "triste",
-    "cansada",
-    "fadiga",
+    "discomfort",
+    "pain",
+    "uncomfortable",
+    "difficult",
+    "hard",
+    "sad",
+    "tired",
+    "fatigue",
+]
+
+TERMS_POSTPARTUM_DEPRESSION = [
+    "postpartum",
+    "depression",
+    "depressed",
+    "hopeless",
+    "crying",
+    "overwhelmed",
+    "baby",
+    "blues",
+    "mood",
+    "swings",
+    "bonding",
+]
+
+TERMS_DOMESTIC_VIOLENCE = [
+    "abuse",
+    "abused",
+    "hit",
+    "hurt",
+    "threatened",
+    "controlling",
+    "afraid",
+    "violence",
+    "violent",
+]
+
+TERMS_HORMONAL_FATIGUE = [
+    "exhausted",
+    "hormonal",
+    "mood",
+    "irritable",
+    "foggy",
+    "drained",
+    "fogginess",
 ]
 
 TERM_LABELS = {
     "anxiety": TERMS_ANXIETY,
     "hesitation": TERMS_HESITATION,
     "discomfort": TERMS_DISCOMFORT,
+    "postpartum_depression": TERMS_POSTPARTUM_DEPRESSION,
+    "domestic_violence": TERMS_DOMESTIC_VIOLENCE,
+    "hormonal_fatigue": TERMS_HORMONAL_FATIGUE,
 }
 
 SUMMARY_MESSAGES = {
-    "anxiety": "Possíveis indicadores de ansiedade ({} menções).",
-    "hesitation": "Hesitação ou preenchimentos ({} ocorrências).",
-    "discomfort": "Indicadores de desconforto ({} menções).",
+    "anxiety": "Possible anxiety indicators ({} mentions).",
+    "hesitation": "Hesitation or fillers ({} occurrences).",
+    "discomfort": "Discomfort indicators ({} mentions).",
+    "postpartum_depression": "Postpartum depression indicators ({} mentions).",
+    "domestic_violence": "Domestic violence indicators ({} mentions).",
+    "hormonal_fatigue": "Hormonal fatigue indicators ({} mentions).",
 }
 
 
 def analyze_transcript_text(text: str) -> dict:
-    """
-    Analisa o texto transcrito com regras simples (listas de termos).
-    Retorna dict com: anxiety_indicators, hesitation_indicators, discomfort_indicators,
-    matched_terms, summary.
-    """
+    """Analyze transcript with term-list rules.
+    Return dict with indicators and summary."""
     if not text or not text.strip():
         return {
             "anxiety_indicators": 0,
             "hesitation_indicators": 0,
             "discomfort_indicators": 0,
+            "postpartum_depression_indicators": 0,
+            "domestic_violence_indicators": 0,
+            "hormonal_fatigue_indicators": 0,
             "matched_terms": [],
-            "summary": "Texto vazio ou sem fala detectada.",
+            "summary": "Empty text or no speech detected.",
         }
     lower = text.lower().strip()
     words = lower.split()
@@ -85,12 +126,15 @@ def analyze_transcript_text(text: str) -> dict:
     summary = (
         " ".join(summary_parts)
         if summary_parts
-        else "Nenhum indicador forte detectado nas listas de termos."
+        else "No strong indicators detected in term lists."
     )
     return {
         "anxiety_indicators": counts["anxiety"],
         "hesitation_indicators": counts["hesitation"],
         "discomfort_indicators": counts["discomfort"],
+        "postpartum_depression_indicators": counts["postpartum_depression"],
+        "domestic_violence_indicators": counts["domestic_violence"],
+        "hormonal_fatigue_indicators": counts["hormonal_fatigue"],
         "matched_terms": matched,
         "summary": summary,
     }

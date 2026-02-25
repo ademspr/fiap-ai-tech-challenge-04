@@ -1,4 +1,4 @@
-"""Pipeline de análise de vídeo: leitura, YOLOv8-pose e heurísticas."""
+"""Video analysis pipeline: YOLOv8-pose and body language heuristics."""
 
 import os
 import shutil
@@ -12,42 +12,113 @@ from moviepy.editor import VideoFileClip
 from PIL import Image, ImageDraw, ImageFont
 from ultralytics import YOLO
 
-import config
-from video.heuristics import compute_frame_indicators
+from config import (
+    ANNOTATION_BBOX_PADDING_PX,
+    ANNOTATION_BOX_COLOR,
+    ANNOTATION_BOX_THICKNESS,
+    ANNOTATION_DISPLAY_FRAMES,
+    ANNOTATION_FONT,
+    ANNOTATION_FONT_SCALE,
+    ANNOTATION_TEXT_COLOR,
+    ANNOTATION_TEXT_THICKNESS,
+    DETECTION_CONFIDENCE_THRESHOLD,
+    VIDEO_SAMPLE_EVERY_N_FRAMES,
+    YOLO_DEVICE,
+    YOLO_POSE_MODEL,
+)
+from video.heuristics import MIN_CONF, compute_frame_indicators
 
-# Fonte embutida no projeto (UTF-8/acentos); igual em qualquer SO
 _BUNDLED_FONT_PATH = Path(__file__).resolve().parent / "fonts" / "DejaVuSans.ttf"
 
 REASON_TO_LABEL = {
-    "head_lowered": "Cabeça baixa",
-    "hands_near_face": "Mãos no rosto",
-    "arms_defensive": "Braços defensivos",
-    "closed_posture": "Postura fechada",
-    "arms_raised": "Braço(s) levantado(s)",
-    "shoulders_contracted": "Ombros contraídos",
+    "head_lowered": "Head lowered",
+    "hands_near_face": "Hands near face",
+    "arms_defensive": "Defensive arms",
+    "closed_posture": "Closed posture",
+    "arms_raised": "Arms raised",
+    "shoulders_contracted": "Shoulders contracted",
+    "arms_crossed": "Arms crossed",
+    "hands_on_hips": "Hands on hips",
+    "shoulders_raised": "Shoulders raised",
+    "hand_on_chest": "Hand on chest",
+    "hand_to_neck": "Hand to neck",
+    "leaning_back": "Leaning back",
+    "leaning_forward": "Leaning forward",
+    "legs_closed": "Legs closed",
+    "body_turned_away": "Body turned away",
+    "hands_clasped": "Hands clasped",
 }
 
 
 def _load_model():
-    return YOLO(config.YOLO_POSE_MODEL)
+    return YOLO(YOLO_POSE_MODEL)
 
 
-def _frame_to_keypoints_and_bbox(model, frame, device: str):
-    """
-    Executa YOLOv8-pose no frame.
-    Retorna (keypoints, bbox_xyxy) da primeira pessoa; bbox é [x1,y1,x2,y2] ou None.
-    """
+def _frame_to_all_persons(model, frame, device: str):
+    """Return list of (keypoints, bounding_box) per person above threshold"""
+    threshold = DETECTION_CONFIDENCE_THRESHOLD
     results = model(frame, device=device, verbose=False)
     if not results or len(results) == 0:
-        return None, None
-    r = results[0]
-    if r.keypoints is None or r.keypoints.data is None or len(r.keypoints.data) == 0:
-        return None, None
-    kpts = r.keypoints.data[0].cpu().numpy()
-    bbox = None
-    if r.boxes is not None and r.boxes.xyxy is not None and len(r.boxes.xyxy) > 0:
-        bbox = r.boxes.xyxy[0].cpu().numpy().tolist()
-    return kpts, bbox
+        return []
+    result = results[0]
+    if (
+        result.keypoints is None
+        or result.keypoints.data is None
+        or len(result.keypoints.data) == 0
+    ):
+        return []
+    persons = []
+    num_keypoints = len(result.keypoints.data)
+    if (
+        result.boxes is not None
+        and hasattr(result.boxes, "conf")
+        and result.boxes.conf is not None
+    ):
+        confidences = result.boxes.conf.cpu().numpy()
+    else:
+        confidences = np.ones(num_keypoints)
+    for i in range(num_keypoints):
+        confidence = float(confidences[i]) if i < len(confidences) else 1.0
+        if confidence < threshold:
+            continue
+        keypoints = result.keypoints.data[i].cpu().numpy()
+        bounding_box = None
+        if (
+            result.boxes is not None
+            and result.boxes.xyxy is not None
+            and i < len(result.boxes.xyxy)
+        ):
+            bounding_box = result.boxes.xyxy[i].cpu().numpy().tolist()
+        persons.append((keypoints, bounding_box))
+    return persons
+
+
+def _keypoints_to_bbox(
+    keypoints: np.ndarray,
+    padding: int | None = None,
+    upper_body_only: bool = True,
+) -> list[float] | None:
+    """Compute tight bounding box from keypoints (upper body by default)."""
+    pad = padding if padding is not None else ANNOTATION_BBOX_PADDING_PX
+    if keypoints is None or keypoints.shape[0] < 13:
+        return None
+    end_idx = 13 if upper_body_only else keypoints.shape[0]
+    pts = []
+    for i in range(end_idx):
+        if i >= keypoints.shape[0]:
+            break
+        row = keypoints[i]
+        if len(row) >= 3 and float(row[2]) >= MIN_CONF:
+            pts.append((float(row[0]), float(row[1])))
+    if len(pts) < 3:
+        return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    x1 = max(0, min(xs) - pad)
+    y1 = max(0, min(ys) - pad)
+    x2 = max(xs) + pad
+    y2 = max(ys) + pad
+    return [x1, y1, x2, y2]
 
 
 def analyze_video(  # noqa: C901
@@ -55,24 +126,21 @@ def analyze_video(  # noqa: C901
     sample_every_n: int | None = None,
     device: str | None = None,
 ):
-    """
-    Analisa vídeo com YOLOv8-pose e heurísticas de desconforto/medo/defensivo.
-    Retorna dict: fps, total_frames, sampled_frames, segments, summary.
-    """
-    sample_every_n = sample_every_n or config.VIDEO_SAMPLE_EVERY_N_FRAMES
-    device = device or config.YOLO_DEVICE
-    vpath = Path(video_path)
-    if not vpath.exists():
-        raise FileNotFoundError(f"Arquivo não encontrado: {vpath}")
+    """Analyze video with YOLOv8-pose and discomfort/defensive heuristics."""
+    sample_every_n = sample_every_n or VIDEO_SAMPLE_EVERY_N_FRAMES
+    device = device or YOLO_DEVICE
+    video_path_resolved = Path(video_path)
+    if not video_path_resolved.exists():
+        raise FileNotFoundError(f"File not found: {video_path_resolved}")
 
-    cap = cv2.VideoCapture(str(vpath))
-    if not cap.isOpened():
-        raise OSError(f"Não foi possível abrir o vídeo: {video_path}")
+    video_capture = cv2.VideoCapture(str(video_path_resolved))
+    if not video_capture.isOpened():
+        raise OSError(f"Could not open video: {video_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = video_capture.get(cv2.CAP_PROP_FPS) or 25.0
+    total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    video_width = int(video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    video_height = int(video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     model = _load_model()
     segments: list[dict[str, Any]] = []
@@ -83,49 +151,60 @@ def analyze_video(  # noqa: C901
     discomfort_count = 0
 
     while True:
-        ret, frame = cap.read()
+        ret, frame = video_capture.read()
         if not ret:
             break
         if frame_idx % sample_every_n != 0:
             frame_idx += 1
             continue
-        t = frame_idx / fps
-        kpts, bbox = _frame_to_keypoints_and_bbox(model, frame, device)
-        indicators = compute_frame_indicators(kpts)
+        timestamp_sec = frame_idx / fps
+        persons = _frame_to_all_persons(model, frame, device)
         sampled += 1
-        if indicators["discomfort"]:
-            discomfort_count += 1
-            reasons: list[str] = indicators["reasons"]
-            if bbox is not None:
-                labels = [REASON_TO_LABEL.get(reason, reason) for reason in reasons]
-                label = ", ".join(labels)
-                frame_annotations.append(
-                    {
-                        "frame_index": frame_idx,
-                        "time": round(t, 2),
-                        "bbox": [round(float(x), 1) for x in bbox],
-                        "reasons": list(reasons),
-                        "label": label,
-                    }
+        frame_has_discomfort = False
+        all_reasons: list[str] = []
+        for keypoints, bounding_box in ((p[0], p[1]) for p in persons):
+            indicators = compute_frame_indicators(keypoints)
+            if indicators["discomfort"]:
+                frame_has_discomfort = True
+                reasons: list[str] = indicators["reasons"]
+                all_reasons.extend(r for r in reasons if r not in all_reasons)
+                annotation_bbox = (
+                    _keypoints_to_bbox(keypoints) if keypoints is not None else None
                 )
+                if annotation_bbox is None:
+                    annotation_bbox = bounding_box
+                if annotation_bbox is not None:
+                    labels = [REASON_TO_LABEL.get(reason, reason) for reason in reasons]
+                    label = ", ".join(labels)
+                    frame_annotations.append(
+                        {
+                            "frame_index": frame_idx,
+                            "time": round(timestamp_sec, 2),
+                            "bbox": [round(float(x), 1) for x in annotation_bbox],
+                            "reasons": list(reasons),
+                            "label": label,
+                        }
+                    )
+        if frame_has_discomfort:
+            discomfort_count += 1
             if current_segment is None:
                 current_segment = {
-                    "start_time": t,
-                    "end_time": t,
-                    "reasons": list(reasons),
+                    "start_time": timestamp_sec,
+                    "end_time": timestamp_sec,
+                    "reasons": list(all_reasons),
                 }
             else:
-                current_segment["end_time"] = t
-                reas = cast(list[str], current_segment["reasons"])
-                for r in reasons:
-                    if r not in reas:
-                        reas.append(r)
+                current_segment["end_time"] = timestamp_sec
+                segment_reasons = cast(list[str], current_segment["reasons"])
+                for reason in all_reasons:
+                    if reason not in segment_reasons:
+                        segment_reasons.append(reason)
         else:
             if current_segment is not None:
                 segments.append(current_segment)
                 current_segment = None
         frame_idx += 1
-    cap.release()
+    video_capture.release()
     if current_segment is not None:
         segments.append(current_segment)
 
@@ -147,16 +226,13 @@ def analyze_video(  # noqa: C901
 
 
 def run_video_pipeline(video_path: str) -> dict:
-    """
-    Executa o pipeline de vídeo (análise apenas).
-    Retorna o resultado da análise; relatório JSON fica a cargo do chamador.
-    """
+    """Run video pipeline (analysis only). Return analysis result dict."""
     result: dict = analyze_video(video_path)
     return result
 
 
 def _find_utf8_font(size: int = 20):
-    """Retorna ImageFont que suporta UTF-8 (fonte do projeto) ou None."""
+    """Return ImageFont for UTF-8 (bundled) or None."""
     if _BUNDLED_FONT_PATH.is_file():
         try:
             return ImageFont.truetype(str(_BUNDLED_FONT_PATH), size)
@@ -170,10 +246,7 @@ def _draw_label_pillow(
     color_bgr: tuple[int, int, int],
     font_scale: float,
 ) -> tuple[np.ndarray, int, int] | None:
-    """
-    Desenha texto com acentos (UTF-8) usando Pillow.
-    Retorna (array BGR, largura, altura) ou None para fallback em cv2.putText.
-    """
+    """Draw UTF-8 text with Pillow. Return (BGR array, width, height) or None."""
     if not text.strip():
         return None
     size = max(12, int(22 * font_scale))
@@ -197,43 +270,40 @@ def _draw_label_pillow(
         return None
 
 
-def _get_active_annotation(
+def _get_active_annotations(
     frame_idx: int,
     sorted_annotations: list[dict[str, Any]],
-    sample_every_n: int,
-) -> dict[str, Any] | None:
-    """Retorna a anotação ativa para frame_idx (persiste por sample_every_n frames)."""
-    for ann in reversed(sorted_annotations):
-        fi = ann["frame_index"]
-        if fi <= frame_idx and (frame_idx - fi) < sample_every_n:
-            return ann
-    return None
+    display_frames: int,
+) -> list[dict[str, Any]]:
+    """Return all annotations active for frame_idx (persist for display_frames)."""
+    best_frame_index: int | None = None
+    for annotation in reversed(sorted_annotations):
+        frame_index = annotation["frame_index"]
+        if frame_index <= frame_idx and (frame_idx - frame_index) < display_frames:
+            best_frame_index = frame_index
+            break
+    if best_frame_index is None:
+        return []
+    return [a for a in sorted_annotations if a["frame_index"] == best_frame_index]
 
 
 def render_annotated_video(  # noqa: C901
     video_path: str, report: dict, output_path: str
 ) -> None:
-    """
-    Gera vídeo com caixas e rótulos (UTF-8 com Pillow); persiste anotação por
-    video_sample_every_n frames. Grava em temp e usa MoviePy para muxar áudio.
-    """
+    """Generate video with boxes and labels (via Pillow). Use MoviePy for audio."""
     frame_annotations = report.get("frame_annotations")
     if not frame_annotations:
-        raise ValueError(
-            "Relatório sem frame_annotations; execute antes o comando de análise."
-        )
-    sample_every_n = report.get(
-        "video_sample_every_n_frames", config.VIDEO_SAMPLE_EVERY_N_FRAMES
-    )
+        raise ValueError("Report missing frame_annotations; run analysis first.")
+    display_frames = ANNOTATION_DISPLAY_FRAMES
     sorted_annotations = sorted(frame_annotations, key=lambda a: a["frame_index"])
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise OSError(f"Não foi possível abrir o vídeo: {video_path}")
+    video_capture = cv2.VideoCapture(str(video_path))
+    if not video_capture.isOpened():
+        raise OSError(f"Could not open video: {video_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = video_capture.get(cv2.CAP_PROP_FPS) or 25.0
+    width = int(video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
     fd, temp_path = tempfile.mkstemp(suffix=".mp4")
@@ -246,27 +316,29 @@ def render_annotated_video(  # noqa: C901
 
     frame_idx = 0
     while True:
-        ret, frame = cap.read()
+        ret, frame = video_capture.read()
         if not ret:
             break
-        ann = _get_active_annotation(frame_idx, sorted_annotations, sample_every_n)
-        if ann is not None:
-            bbox = ann["bbox"]
-            x1, y1 = int(bbox[0]), int(bbox[1])
-            x2, y2 = int(bbox[2]), int(bbox[3])
+        annotations = _get_active_annotations(
+            frame_idx, sorted_annotations, display_frames
+        )
+        for annotation in annotations:
+            bounding_box = annotation["bbox"]
+            x1, y1 = int(bounding_box[0]), int(bounding_box[1])
+            x2, y2 = int(bounding_box[2]), int(bounding_box[3])
             cv2.rectangle(
                 frame,
                 (x1, y1),
                 (x2, y2),
-                config.ANNOTATION_BOX_COLOR,
-                config.ANNOTATION_BOX_THICKNESS,
+                ANNOTATION_BOX_COLOR,
+                ANNOTATION_BOX_THICKNESS,
             )
-            label = ann.get("label", "")
+            label = annotation.get("label", "")
             text_y = max(y1 - 10, 25)
             patch_result = _draw_label_pillow(
                 label,
-                config.ANNOTATION_TEXT_COLOR,
-                config.ANNOTATION_FONT_SCALE,
+                ANNOTATION_TEXT_COLOR,
+                ANNOTATION_FONT_SCALE,
             )
             if patch_result is not None:
                 patch, pw, ph = patch_result
@@ -283,15 +355,15 @@ def render_annotated_video(  # noqa: C901
                     frame,
                     label,
                     (x1, text_y),
-                    config.ANNOTATION_FONT,
-                    config.ANNOTATION_FONT_SCALE,
-                    config.ANNOTATION_TEXT_COLOR,
-                    config.ANNOTATION_TEXT_THICKNESS,
+                    ANNOTATION_FONT,
+                    ANNOTATION_FONT_SCALE,
+                    ANNOTATION_TEXT_COLOR,
+                    ANNOTATION_TEXT_THICKNESS,
                 )
         out.write(frame)
         frame_idx += 1
 
-    cap.release()
+    video_capture.release()
     out.release()
 
     try:

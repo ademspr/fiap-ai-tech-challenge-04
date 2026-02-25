@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "fiap-video-analysis"
 version = "0.1.0"
-description = "@TODO"
+description = "Multimodal analysis of consultation and healthcare videos"
 authors = [
     "Ademir Pereira <ademirspr@live.com>",
     "Gabriel Santos <gabriel@ogabrielsantos.com.br>",

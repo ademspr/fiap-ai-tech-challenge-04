@@ -1,57 +1,57 @@
-"""Pipeline de áudio: extração do vídeo, transcrição (faster-whisper), análise."""
+"""Audio pipeline: extract from video, transcribe (faster-whisper), analyze."""
 
 from pathlib import Path
 
 from faster_whisper import WhisperModel
 from moviepy.editor import VideoFileClip
 
-import config
 from audio.analyzer import analyze_transcript_text
+from config import (
+    OUTPUT_DIR,
+    WHISPER_COMPUTE_TYPE,
+    WHISPER_DEVICE,
+    WHISPER_LANGUAGE,
+    WHISPER_MODEL_SIZE,
+)
 
 
 def extract_audio(video_path: str, audio_path: str | None = None) -> str:
-    """
-    Extrai a trilha de áudio do vídeo em WAV.
-    Retorna o caminho do arquivo de áudio gerado.
-    """
-    vpath = Path(video_path)
-    if not vpath.exists():
-        raise FileNotFoundError(f"Vídeo não encontrado: {vpath}")
+    """Extract audio track from video to WAV. Return path to generated file."""
+    video_path_resolved = Path(video_path)
+    if not video_path_resolved.exists():
+        raise FileNotFoundError(f"Video not found: {video_path_resolved}")
     if audio_path is None:
-        out_dir = Path(config.OUTPUT_DIR)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_audio = out_dir / f"{vpath.stem}_audio.wav"
+        output_dir = Path(OUTPUT_DIR)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_audio_path = output_dir / f"{video_path_resolved.stem}_audio.wav"
     else:
-        out_audio = Path(audio_path)
-        out_audio.parent.mkdir(parents=True, exist_ok=True)
-    clip = VideoFileClip(str(vpath))
+        output_audio_path = Path(audio_path)
+        output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+    clip = VideoFileClip(str(video_path_resolved))
     if clip.audio is None:
         clip.close()
-        raise ValueError("O vídeo não possui trilha de áudio.")
+        raise ValueError("Video has no audio track.")
     clip.audio.write_audiofile(
-        str(out_audio), codec="pcm_s16le", verbose=False, logger=None
+        str(output_audio_path), codec="pcm_s16le", verbose=False, logger=None
     )
     clip.close()
-    return str(out_audio)
+    return str(output_audio_path)
 
 
 def transcribe_audio(audio_path: str) -> str:
-    """
-    Transcreve o áudio com faster-whisper (modelo tiny/base, CPU).
-    Retorna o texto transcrito.
-    """
+    """Transcribe audio with faster-whisper. Return transcribed text."""
     model = WhisperModel(
-        config.WHISPER_MODEL_SIZE,
-        device=config.WHISPER_DEVICE,
-        compute_type=config.WHISPER_COMPUTE_TYPE,
+        WHISPER_MODEL_SIZE,
+        device=WHISPER_DEVICE,
+        compute_type=WHISPER_COMPUTE_TYPE,
     )
-    segments, _ = model.transcribe(audio_path, language="pt")
+    segments, _ = model.transcribe(audio_path, language=WHISPER_LANGUAGE)
     parts = [s.text.strip() for s in segments if s.text.strip()]
     return " ".join(parts).strip()
 
 
 def analyze_transcript(transcript: str) -> dict:
-    """Analisa o texto transcrito com regras/heurísticas. Retorna dict."""
+    """Analyze transcript with rules/heuristics. Return dict."""
     return analyze_transcript_text(transcript)
 
 
@@ -59,23 +59,23 @@ def run_audio_pipeline(
     video_path: str,
     output_dir: str | None = None,
 ) -> dict:
-    """
-    Executa o pipeline de áudio: extrai áudio, transcreve e analisa.
-    Retorna dict com transcript e analysis; relatório JSON e diretório
-    de saída ficam a cargo do chamador.
-    """
-    vpath = Path(video_path)
-    if not vpath.exists():
-        raise FileNotFoundError(f"Arquivo não encontrado: {vpath}")
+    """Run audio pipeline: extract, transcribe, analyze.
+    Return dict with transcript and analysis."""
+    video_path_resolved = Path(video_path)
+    if not video_path_resolved.exists():
+        raise FileNotFoundError(f"File not found: {video_path_resolved}")
 
-    out_dir = Path(output_dir or config.OUTPUT_DIR)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    output_dir_resolved = Path(output_dir or OUTPUT_DIR)
+    output_dir_resolved.mkdir(parents=True, exist_ok=True)
 
-    wav_path = extract_audio(str(vpath), str(out_dir / f"{vpath.stem}_audio.wav"))
+    wav_path = extract_audio(
+        str(video_path_resolved),
+        str(output_dir_resolved / f"{video_path_resolved.stem}_audio.wav"),
+    )
     transcript = transcribe_audio(wav_path)
 
     return {
-        "video_path": str(vpath),
+        "video_path": str(video_path_resolved),
         "audio_path": wav_path,
         "transcript": transcript,
         "analysis": analyze_transcript(transcript),

@@ -1,87 +1,89 @@
 # fiap-ai-tech-challenge-04
 
-Análise multimodal de vídeos de consulta (saúde da mulher): **análise de vídeo** (YOLOv8-pose + heurísticas de linguagem corporal) e **processamento de gravações de voz** (transcrição com faster-whisper e análise do texto). Executável em computador pessoal, sem GPU e sem serviços em nuvem.
+Multimodal analysis of consultation and healthcare videos: **video analysis** (YOLOv8-pose + body language heuristics) and **voice recording processing** (transcription with faster-whisper and text analysis). Applicable to medical, psychological, physiotherapy consultations, births, surgeries, and postpartum sessions. Runs on a personal computer without GPU or cloud services.
 
-## Requisitos
+## Requirements
 
 - Python 3.12
 - Poetry
 
-## Instalação
+## Installation
 
 ```bash
 poetry install
 ```
 
-Na primeira execução, o YOLOv8 (modelo `yolov8n-pose.pt`) e o faster-whisper (modelo `tiny`) serão baixados automaticamente. Depois disso, o fluxo roda **offline**.
+On first run, YOLOv8 (`yolov8n-pose.pt`) and faster-whisper (`tiny`) are downloaded automatically. After that, the pipeline runs **offline**.
 
-## Uso
+## Usage
 
-Coloque um vídeo de consulta (ex.: `data/demo_consultation.mp4`). Dois subcomandos:
+Place a consultation video in `data/` (e.g. `data/teste.mp4`). Two subcommands:
 
-**Análise (relatórios JSON):**
-
-```bash
-poetry run python main.py run data/demo_consultation.mp4
-```
-
-Opções: `--output-dir DIR`, `--skip-audio`, `--skip-video`.
-
-**Vídeo anotado (caixas e rótulos no vídeo, com áudio e tempo correto):**
+**Analysis (JSON reports):**
 
 ```bash
-poetry run python main.py annotate-video data/demo_consultation.mp4
+poetry run python main.py run data/teste.mp4
 ```
 
-O vídeo anotado é gerado em `output/video_annotated_<nome>.mp4`. O áudio do vídeo original e os metadados de duração (tempo em segundos no player) são incluídos **em Python** via MoviePy; o texto com acentos (ex.: "Mãos no rosto") é desenhado com Pillow. O usuário não precisa executar ffmpeg manualmente.
+Options: `--output-dir DIR`, `--skip-audio`, `--skip-video`.
 
-Os relatórios (JSON) são gerados em `output/`:
-
-- `video_report_<nome>.json` — Análise de pose e indicadores de desconforto/medo/defensivo.
-- `audio_report_<nome>.json` — Transcrição e análise do texto (indicadores de ansiedade, hesitação, etc.).
-- `consolidated_<nome>.json` — Resumo dos dois pipelines.
-
-## Vídeo para demonstração
-
-Sugestão: use um vídeo curto (30 s a 2 min) de cena de consulta (médico + paciente), com áudio de fala. Exemplos de fontes gratuitas:
-
-- **Pexels:** "Doctor Talking to a Patient Sitting on Bed", "Women on Checkup in Doctors Office".
-- **Mixkit:** busque por "female doctor consultation" ou "patient doctor conversation".
-
-Coloque o arquivo em `data/` (ex.: `data/demo_consultation.mp4`) e rode:
+**Annotated video (boxes and labels, with audio and correct timing):**
 
 ```bash
-poetry run python main.py run data/demo_consultation.mp4
+poetry run python main.py annotate-video data/teste.mp4
 ```
 
-## Fluxo multimodal
+The annotated video is written to `output/video_annotated_<name>.mp4`. Original audio and duration metadata are included via MoviePy; annotation text (e.g. "Hands near face") is drawn with Pillow. No manual ffmpeg required.
 
-1. **Vídeo:** OpenCV lê o vídeo → YOLOv8-pose (modelo nano ou small, CPU) extrai keypoints → heurísticas detectam postura de desconforto, cabeça baixa, mãos no rosto, braços defensivos → relatório com segmentos e contagens.
-2. **Áudio:** MoviePy extrai o áudio em WAV → faster-whisper (modelo tiny/base, CPU) transcreve em português → análise por listas de termos (ansiedade, hesitação, desconforto) → relatório com transcrição e indicadores.
+Reports (JSON) are written to `output/`:
 
-## Configuração
+- `video_report_<name>.json` — Pose analysis and discomfort/defensive indicators (16 body language patterns).
+- `audio_report_<name>.json` — English transcription and text analysis (anxiety, hesitation, discomfort, postpartum depression, domestic violence, hormonal fatigue).
+- `consolidated_<name>.json` — Summary of both pipelines.
 
-Edite `config.py` para alterar:
+## Sample video
 
-- `YOLO_POSE_MODEL` — `yolov8n-pose.pt` (nano) ou `yolov8s-pose.pt` (small).
-- `VIDEO_SAMPLE_EVERY_N_FRAMES` — Processar 1 a cada N frames (padrão 3; menor = mais padrões detectados, mais uso de CPU).
-- `WHISPER_MODEL_SIZE` — `tiny` ou `base` para CPU.
+Use **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** (install with `pip install yt-dlp` or `brew install yt-dlp`) to download a demo video:
 
-## Estrutura do projeto
+```bash
+yt-dlp -f mp4 -o data/teste.mp4 "https://www.youtube.com/watch?v=snG5323GGQ4"
+```
 
-- `main.py` — Orquestrador (CLI).
-- `config.py` — Configurações (modelos, pastas).
-- `video/` — Pipeline de vídeo (YOLOv8-pose, heurísticas, relatório, vídeo anotado com Pillow e MoviePy).
-- `audio/` — Pipeline de áudio (MoviePy, faster-whisper, análise de texto, relatório).
-- `data/` — Pasta para vídeo(s) de demonstração.
-- `output/` — Relatórios gerados (criada automaticamente).
+If you already downloaded elsewhere, move to `data/` and rename to `teste.mp4`:
 
-## Padrão de código
+```bash
+cd data
+mv "DownloadedFileName.mp4" teste.mp4
+```
 
-O projeto usa **black**, **isort**, **flake8** e **mypy** (ver `pyproject.toml` e `.pre-commit-config.yaml`). Não altere essas configurações.
+Use a short video (30 s to 2 min) of a consultation scene (doctor + patient) with **English** speech (transcription and audio analysis use English). Free sources: **Pexels** ("Doctor Talking to a Patient Sitting on Bed"), **Mixkit** ("female doctor consultation").
 
-## Entregáveis (Tech Challenge Fase 4)
+Then run:
 
-- Análise de vídeo com YOLOv8 (pose) e relatório com indicadores visuais de desconforto e alertas para triagem.
-- Processamento de gravação de voz (transcrição + análise do texto) com relatório.
-- Execução local em computador pessoal, sem integração com serviços em nuvem.
+```bash
+poetry run python main.py run data/teste.mp4
+poetry run python main.py annotate-video data/teste.mp4
+```
+
+## Multimodal flow
+
+1. **Video:** OpenCV reads video → YOLOv8-pose (nano/small, CPU) extracts keypoints → heuristics detect 16 body language patterns (head lowered, hands near face, defensive arms, arms crossed, hands on hips, shoulders raised, hand on chest, hand to neck, leaning, legs closed, body turned away, hands clasped, etc.) → report with segments and counts.
+2. **Audio:** MoviePy extracts audio to WAV → faster-whisper (tiny/base, CPU) transcribes in English → term-list analysis (anxiety, hesitation, discomfort, postpartum depression, domestic violence, hormonal fatigue) → report with transcript and indicators.
+
+## Configuration
+
+Edit `config.py` to change:
+
+- `YOLO_POSE_MODEL` — `yolov8n-pose.pt` (nano) or `yolov8s-pose.pt` (small).
+- `VIDEO_SAMPLE_EVERY_N_FRAMES` — Sample 1 every N frames (default 5; lower = more patterns, more CPU).
+- `WHISPER_MODEL_SIZE` — `tiny` or `base` for CPU.
+- `WHISPER_LANGUAGE` — `en` (English) or `pt` (Portuguese).
+
+## Project structure
+
+- `main.py` — CLI orchestrator.
+- `config.py` — Configuration (models, paths).
+- `video/` — Video pipeline (YOLOv8-pose, heuristics, report, annotated video with Pillow and MoviePy).
+- `audio/` — Audio pipeline (MoviePy, faster-whisper, text analysis, report).
+- `data/` — Demo video(s).
+- `output/` — Generated reports (created automatically).

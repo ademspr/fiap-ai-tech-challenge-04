@@ -1,21 +1,19 @@
-"""
-Orquestrador: analisa vídeo de consulta (YOLOv8-pose + áudio com faster-whisper)
-e gera relatórios consolidados. Subcomando annotate-video gera vídeo com overlay.
-"""
+"""CLI: multimodal analysis (YOLOv8-pose+faster-whisper)
+and annotated video generation."""
 
 import argparse
 import json
 import sys
 from pathlib import Path
 
-import config
 import report
 from audio.pipeline import run_audio_pipeline
+from config import OUTPUT_DIR
 from video.pipeline import render_annotated_video, run_video_pipeline
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    """Subcomando run: análise multimodal e relatórios."""
+    """Run subcommand: multimodal analysis and reports."""
     video_path = Path(args.video_path)
     report_video = None
     report_audio = None
@@ -24,7 +22,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         output_dir_path = report.ensure_output_dir(args.output_dir)
 
         if not args.skip_video:
-            print("Executando pipeline de vídeo (YOLOv8-pose + heurísticas)...")
+            print("Running video pipeline (YOLOv8-pose + heuristics)...")
 
             report_video = run_video_pipeline(str(video_path))
 
@@ -33,15 +31,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 output_dir_path,
                 f"video_report_{video_path.stem}.json",
             )
-            print(f"Relatório de vídeo: {report_path}")
+            print(f"Video report: {report_path}")
 
-            n = report_video.get("summary", {}).get("total_discomfort_segments", 0)
-            print(f"  Segmentos com indicadores: {n}")
+            num_segments = report_video.get("summary", {}).get(
+                "total_discomfort_segments", 0
+            )
+            print(f"  Segments with indicators: {num_segments}")
 
         if not args.skip_audio:
-            print(
-                "Executando pipeline de áudio (MoviePy + faster-whisper + análise)..."
-            )
+            print("Running audio pipeline (MoviePy + faster-whisper + analysis)...")
 
             report_audio = run_audio_pipeline(
                 str(video_path), output_dir=str(output_dir_path)
@@ -52,10 +50,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 output_dir_path,
                 f"audio_report_{video_path.stem}.json",
             )
-            print(f"Relatório de áudio: {report_path}")
+            print(f"Audio report: {report_path}")
 
             summary = report_audio.get("analysis", {}).get("summary", "")
-            print(f"  Resumo: {summary}")
+            print(f"  Summary: {summary}")
 
         consolidated = {
             "video_path": str(video_path),
@@ -68,18 +66,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
             output_dir_path,
             f"consolidated_{video_path.stem}.json",
         )
-        print(f"Relatório consolidado: {consolidated_path}")
+        print(f"Consolidated report: {consolidated_path}")
         return 0
     except Exception as e:
-        print(f"Erro: {e}", file=sys.stderr)
+        print(f"Error: {e}", file=sys.stderr)
         return 1
 
 
 def _cmd_annotate_video(args: argparse.Namespace) -> int:
-    """Subcomando annotate-video: gera vídeo com caixas e rótulos."""
+    """Annotate-video subcommand: generate video with boxes and labels."""
     video_path = Path(args.video_path)
     if not video_path.exists():
-        print(f"Erro: vídeo não encontrado: {video_path}", file=sys.stderr)
+        print(f"Error: video not found: {video_path}", file=sys.stderr)
         return 1
 
     output_dir_path = report.ensure_output_dir(args.output_dir)
@@ -89,14 +87,14 @@ def _cmd_annotate_video(args: argparse.Namespace) -> int:
         else output_dir_path / f"video_report_{video_path.stem}.json"
     )
     if not report_path.exists():
-        print(f"Erro: relatório não encontrado: {report_path}", file=sys.stderr)
+        print(f"Error: report not found: {report_path}", file=sys.stderr)
         return 1
 
     try:
         with open(report_path, encoding="utf-8") as f:
             report_data = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
-        print(f"Erro ao ler relatório: {e}", file=sys.stderr)
+        print(f"Error reading report: {e}", file=sys.stderr)
         return 1
 
     output_video_path = (
@@ -108,71 +106,70 @@ def _cmd_annotate_video(args: argparse.Namespace) -> int:
     try:
         render_annotated_video(str(video_path), report_data, str(output_video_path))
     except (ValueError, OSError) as e:
-        print(f"Erro: {e}", file=sys.stderr)
+        print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    print(f"Vídeo anotado: {output_video_path}")
+    print(f"Annotated video: {output_video_path}")
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Análise multimodal de vídeo de consulta (saúde da mulher)."
+        description="Multimodal analysis of consultation videos "
+        "(medical, psychological, physiotherapy)."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    run_parser = subparsers.add_parser(
-        "run", help="Executar análise e gerar relatórios"
-    )
+    run_parser = subparsers.add_parser("run", help="Run analysis and generate reports")
     run_parser.add_argument(
         "video_path",
         type=str,
-        help="Caminho do arquivo de vídeo (ex.: data/demo_consultation.mp4)",
+        help="Path to video file (e.g. data/demo_consultation.mp4)",
     )
     run_parser.add_argument(
         "--output-dir",
         type=str,
-        default=config.OUTPUT_DIR,
-        help="Pasta para relatórios de saída",
+        default=OUTPUT_DIR,
+        help="Output directory for reports",
     )
     run_parser.add_argument(
         "--skip-audio",
         action="store_true",
-        help="Executar apenas o pipeline de vídeo",
+        help="Run video pipeline only",
     )
     run_parser.add_argument(
         "--skip-video",
         action="store_true",
-        help="Executar apenas o pipeline de áudio",
+        help="Run audio pipeline only",
     )
     run_parser.set_defaults(func=_cmd_run)
 
     annotate_parser = subparsers.add_parser(
         "annotate-video",
-        help="Gerar vídeo com caixas e rótulos a partir do relatório de vídeo",
+        help="Generate video with boxes and labels from video report",
     )
     annotate_parser.add_argument(
         "video_path",
         type=str,
-        help="Caminho do vídeo original",
+        help="Path to original video",
     )
     annotate_parser.add_argument(
         "--output-dir",
         type=str,
-        default=config.OUTPUT_DIR,
-        help="Pasta do relatório e do vídeo de saída (se --output-video omitido)",
+        default=OUTPUT_DIR,
+        help="Report and output video directory (if --output-video omitted)",
     )
     annotate_parser.add_argument(
         "--report",
         type=str,
         default=None,
-        help="JSON do relatório (default: output_dir/video_report_<stem>.json)",
+        help="Report JSON (default: output_dir/video_report_<stem>.json)",
     )
     annotate_parser.add_argument(
         "--output-video",
         type=str,
         default=None,
-        help="Vídeo de saída (default: output_dir/video_annotated_<stem>.mp4)",
+        help="Output video (default: output_dir/video_annotated_<stem>.mp4)",
     )
     annotate_parser.set_defaults(func=_cmd_annotate_video)
 

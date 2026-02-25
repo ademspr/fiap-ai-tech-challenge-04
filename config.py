@@ -1,30 +1,31 @@
-"""Configuração do projeto: modelos, thresholds e caminhos."""
+"""Project configuration: models, thresholds, and paths."""
 
-# YOLOv8 Pose: variante leve para CPU (nano ou small)
-YOLO_POSE_MODEL = (
-    "yolov8n-pose.pt"  # nano = mais rápido; use yolov8s-pose.pt para mais precisão
-)
+YOLO_POSE_MODEL = "yolov8n-pose.pt"
 YOLO_DEVICE = "cpu"
+DETECTION_CONFIDENCE_THRESHOLD = 0.7
 
-# Processamento de vídeo: amostrar 1 a cada N frames (3 = mais padrões, mais CPU)
-VIDEO_SAMPLE_EVERY_N_FRAMES = 3
+VIDEO_SAMPLE_EVERY_N_FRAMES = 5
+ANNOTATION_DISPLAY_FRAMES = 45
 
-# Heurísticas: distância máxima (px) pulso–nariz para "mãos no rosto"
 HEURISTIC_HANDS_NEAR_FACE_MAX_DIST_PX = 120
+HEURISTIC_HANDS_ON_HIPS_MAX_DIST_PX = 100
+HEURISTIC_HAND_ON_CHEST_MAX_DIST_PX = 120
+HEURISTIC_HAND_TO_NECK_MAX_DIST_PX = 100
+HEURISTIC_LEGS_CLOSED_MAX_DIST_PX = 80
+HEURISTIC_HANDS_CLASPED_MAX_DIST_PX = 60
+HEURISTIC_BODY_TURNED_SHOULDER_DIFF_PX = 25
 
-# faster-whisper: modelo pequeno para CPU (tiny ou base)
 WHISPER_MODEL_SIZE = "tiny"
 WHISPER_DEVICE = "cpu"
-WHISPER_COMPUTE_TYPE = "int8"  # int8 para CPU
+WHISPER_COMPUTE_TYPE = "int8"
+WHISPER_LANGUAGE = "en"
 
-# Pastas
-DATA_DIR = "data"
 OUTPUT_DIR = "output"
 
-# Vídeo anotado: cores e fontes para overlay (OpenCV BGR)
-ANNOTATION_BOX_COLOR = (0, 255, 0)  # verde
+ANNOTATION_BOX_COLOR = (0, 255, 0)
 ANNOTATION_BOX_THICKNESS = 2
-ANNOTATION_FONT = 0  # cv2.FONT_HERSHEY_SIMPLEX
+ANNOTATION_FONT = 0
 ANNOTATION_FONT_SCALE = 0.6
 ANNOTATION_TEXT_COLOR = (255, 255, 255)
 ANNOTATION_TEXT_THICKNESS = 2
+ANNOTATION_BBOX_PADDING_PX = 20
